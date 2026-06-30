@@ -189,9 +189,102 @@ async function getCostingDetails(attachmentUrl, docketNo) {
         }
       }
 
+      // Extract proposed ERP items and quantities
+      const erpItems = [];
+      const qtyItems = [];
+      
+      let erpHeaderRowIdx = -1;
+      let erpColIdx = -1;
+      let qtyColIdx = -1;
+      let unitColIdx = -1;
+      
+      for (let r = range.s.r; r <= Math.min(range.e.r, 40); r++) {
+        for (let c = range.s.c; c <= range.e.c; c++) {
+          const cellRef = XLSX.utils.encode_cell({ r, c });
+          const cell = sheet[cellRef];
+          if (cell && cell.v !== undefined) {
+            const valStr = String(cell.v).trim().toUpperCase();
+            if (valStr === "PROPOSE ERP ITEM NAME") {
+              erpHeaderRowIdx = r;
+              erpColIdx = c;
+            } else if (valStr === "QTY") {
+              qtyColIdx = c;
+            } else if (valStr === "UNIT") {
+              unitColIdx = c;
+            }
+          }
+        }
+        if (erpHeaderRowIdx !== -1) break;
+      }
+      
+      if (erpHeaderRowIdx !== -1 && erpColIdx !== -1) {
+        const seenItems = new Set();
+        
+        for (let r = erpHeaderRowIdx + 1; r <= range.e.r; r++) {
+          // Verify docket cell contains docketNo
+          const docketCellRef = XLSX.utils.encode_cell({ r, c: 0 });
+          const docketCell = sheet[docketCellRef];
+          if (!docketCell || docketCell.v === undefined) {
+            continue;
+          }
+          const docketStr = String(docketCell.v).trim();
+          if (!docketStr.includes(String(docketNo))) {
+            continue;
+          }
+
+          const erpCellRef = XLSX.utils.encode_cell({ r, c: erpColIdx });
+          const erpCell = sheet[erpCellRef];
+          if (erpCell && erpCell.v !== undefined && String(erpCell.v).trim() !== "") {
+            const erpVal = String(erpCell.v).trim();
+            if (erpVal.toUpperCase().includes("PROPOSE") || erpVal.toLowerCase().includes("total") || erpVal.toLowerCase().includes("sum")) {
+              continue;
+            }
+            
+            let qtyVal = "";
+            let qtyNum = null;
+            if (qtyColIdx !== -1) {
+              const qtyCellRef = XLSX.utils.encode_cell({ r, c: qtyColIdx });
+              const qtyCell = sheet[qtyCellRef];
+              if (qtyCell && qtyCell.v !== undefined) {
+                qtyVal = String(qtyCell.v).trim();
+                qtyNum = Number(qtyVal.replace(/[^\d.-]/g, ""));
+              }
+            }
+            
+            let unitVal = "";
+            if (unitColIdx !== -1) {
+              const unitCellRef = XLSX.utils.encode_cell({ r, c: unitColIdx });
+              const unitCell = sheet[unitCellRef];
+              if (unitCell && unitCell.v !== undefined) {
+                unitVal = String(unitCell.v).trim();
+              }
+            }
+
+            // Convert KM/KMS to meters
+            if (qtyNum !== null && !isNaN(qtyNum)) {
+              if (unitVal.toUpperCase().includes("KM")) {
+                qtyVal = String(Math.round(qtyNum * 1000));
+              } else {
+                qtyVal = String(Math.round(qtyNum));
+              }
+            }
+            
+            // Deduplicate matching items with same name and quantity
+            const itemKey = `${erpVal}::${qtyVal}`;
+            if (!seenItems.has(itemKey)) {
+              seenItems.add(itemKey);
+              erpItems.push(erpVal);
+              qtyItems.push(qtyVal);
+            }
+          }
+        }
+      }
+
       return {
         priceBasis,
-        prices
+        prices,
+        proposedErpItemName: erpItems.join("\n"),
+        proposedQty: qtyItems.join("\n")
       };
 
     } catch (err) {
@@ -201,6 +294,193 @@ async function getCostingDetails(attachmentUrl, docketNo) {
   }
 
   return null;
+}
+
+/**
+ * Helper to recursively scan and count files inside a directory.
+ */
+function getFileCount(dirPath) {
+  try {
+    if (!dirPath || !fs.existsSync(dirPath)) return 0;
+    const countFiles = (dir) => {
+      let count = 0;
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          count += countFiles(fullPath);
+        } else if (entry.isFile()) {
+          if (!entry.name.startsWith("~$") && !entry.name.endsWith(".tmp")) {
+            count++;
+          }
+        }
+      }
+      return count;
+    };
+    return countFiles(dirPath);
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * Helper to find boq file recursively inside a directory.
+ */
+/**
+ * Helper to find boq file recursively inside a directory.
+ */
+function findBoqFile(dir) {
+  try {
+    if (!dir || !fs.existsSync(dir)) return null;
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const found = findBoqFile(fullPath);
+        if (found) return found;
+      } else if (entry.isFile()) {
+        const lower = entry.name.toLowerCase();
+        if (lower.includes("boqcomparativechart") || 
+            lower.includes("boq_comparative") || 
+            lower.includes("boq comparative")) {
+          return fullPath;
+        }
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+/**
+ * Helper to extract competitor names and Tender ID from a BoQ comparative chart file.
+ */
+function getBoqFileDetails(filePath) {
+  try {
+    const workbook = XLSX.readFile(filePath);
+    const boqSheetName = workbook.SheetNames.find(s => s.toLowerCase().startsWith("boq") || s.toLowerCase().includes("chart"));
+    if (!boqSheetName) return null;
+    
+    const sheet = workbook.Sheets[boqSheetName];
+    const range = XLSX.utils.decode_range(sheet["!ref"] || "A1:ZZ100");
+
+    let boqTenderId = "";
+    for (let r = 0; r <= Math.min(range.e.r, 15); r++) {
+      for (let c = 0; c <= Math.min(range.e.c, 10); c++) {
+        const cell = sheet[XLSX.utils.encode_cell({ r, c })];
+        if (cell && cell.v !== undefined) {
+          const valStr = String(cell.v);
+          if (valStr.toLowerCase().includes("tender id")) {
+            const parts = valStr.split(/id\s*:/i);
+            if (parts.length > 1 && parts[1].trim()) {
+              boqTenderId = parts[1].trim();
+            } else {
+              const nextCell = sheet[XLSX.utils.encode_cell({ r, c: c + 1 })];
+              if (nextCell && nextCell.v !== undefined) {
+                boqTenderId = String(nextCell.v).trim();
+              }
+            }
+            if (boqTenderId) break;
+          }
+        }
+      }
+      if (boqTenderId) break;
+    }
+
+    let headerRowIdx = -1;
+    for (let r = 0; r <= Math.min(range.e.r, 20); r++) {
+      const cell0 = sheet[XLSX.utils.encode_cell({ r, c: 0 })];
+      const cell1 = sheet[XLSX.utils.encode_cell({ r, c: 1 })];
+      const val0 = cell0 && cell0.v !== undefined ? String(cell0.v).toLowerCase() : "";
+      const val1 = cell1 && cell1.v !== undefined ? String(cell1.v).toLowerCase() : "";
+      if (val0.includes("description") || val1.includes("description") || val0.includes("sl.no") || val0.includes("sl no")) {
+        headerRowIdx = r;
+        break;
+      }
+    }
+    
+    if (headerRowIdx === -1) return null;
+    
+    const competitors = [];
+    const ignoreList = ["sl.no", "sl no", "sl. no.", "description of work / item(s)", "description", "no.of qty", "qty", "units", "unit", "item code", "code"];
+    
+    for (let c = 5; c <= range.e.c; c++) {
+      const cell = sheet[XLSX.utils.encode_cell({ r: headerRowIdx, c })];
+      if (cell && cell.v !== undefined) {
+        const val = String(cell.v).trim();
+        if (val && !ignoreList.includes(val.toLowerCase()) && !competitors.includes(val)) {
+          if (!val.toLowerCase().includes("rate ") && !val.toLowerCase().includes("total") && val.length > 3) {
+            competitors.push(val);
+          }
+        }
+      }
+    }
+
+    return {
+      tenderId: boqTenderId,
+      competitors: competitors.join("\n")
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Loads, verifies, and updates the cache of BoQ parsed details from the file index.
+ */
+function loadBoqCache(dataDir) {
+  const cachePath = path.join(dataDir, "boq_cache.json");
+  let cache = {};
+  if (fs.existsSync(cachePath)) {
+    try {
+      cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"));
+    } catch (e) {
+      console.warn("[BOQCache] Failed to parse existing boq_cache.json", e.message);
+    }
+  }
+
+  const indexDbPath = path.join(dataDir, "file_index.json");
+  if (fs.existsSync(indexDbPath)) {
+    try {
+      const indexDb = JSON.parse(fs.readFileSync(indexDbPath, "utf-8"));
+      let updated = false;
+
+      for (const [absPath, meta] of Object.entries(indexDb)) {
+        const filename = meta.filename || "";
+        const lower = filename.toLowerCase();
+        if (lower.includes("boqcomparativechart") || 
+            lower.includes("boq_comparative") || 
+            lower.includes("boq comparative")) {
+          
+          const existing = cache[absPath];
+          if (!existing || existing.modifiedDate !== meta.modifiedDate) {
+            if (fs.existsSync(absPath)) {
+              console.log(`[BOQCache] Parsing updated/new BoQ file: ${absPath}`);
+              const details = getBoqFileDetails(absPath);
+              if (details) {
+                cache[absPath] = {
+                  modifiedDate: meta.modifiedDate,
+                  tenderId: details.tenderId,
+                  cleanTenderId: details.tenderId.toLowerCase().replace(/[^a-z0-9]/g, ""),
+                  competitors: details.competitors,
+                  parentFolderPath: meta.parentFolderPath || path.dirname(absPath)
+                };
+                updated = true;
+              }
+            }
+          }
+        }
+      }
+
+      if (updated) {
+        fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2), "utf-8");
+        console.log(`[BOQCache] Saved updated boq_cache.json with ${Object.keys(cache).length} entries.`);
+      }
+    } catch (err) {
+      console.warn("[BOQCache] Error updating BoQ cache:", err.message);
+    }
+  }
+
+  return cache;
 }
 
 /**
@@ -218,6 +498,8 @@ export default async function handler(req, res) {
   
   if (req.method === "OPTIONS") {
     return res.status(200).end();
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.
+
   }
 
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
@@ -289,6 +571,93 @@ export default async function handler(req, res) {
       console.warn(`[WARNING] Error fetching costing sheet: ${costingErr.message}`);
     }
 
+    // --- NEW: Fetch Status Category Sheet Data ---
+    let statusCategoryRows = [];
+    try {
+      const STATUS_SPREADSHEET_ID = "1PVujEFMUdA4hqvm357oseASTajgEdIYDZFANm9WF3iE";
+      const statusUrl = `https://sheets.googleapis.com/v4/spreadsheets/${STATUS_SPREADSHEET_ID}/values/Sheet1!A1:ZZ`;
+
+      console.log(`[${new Date().toLocaleTimeString()}] Fetching status category sheet data...`);
+      const statusResponse = await fetch(statusUrl, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        }
+      });
+
+      if (statusResponse.ok) {
+        const statusData = await statusResponse.json();
+        statusCategoryRows = statusData.values || [];
+        console.log(`✓ Fetched ${statusCategoryRows.length} rows from status category sheet.`);
+      } else {
+        const statusErrorText = await statusResponse.text();
+        console.warn(`[WARNING] Failed to fetch status category sheet (status ${statusResponse.status}): ${statusErrorText}`);
+      }
+    } catch (statusErr) {
+      console.warn(`[WARNING] Error fetching status category sheet: ${statusErr.message}`);
+    }
+
+    let folderMatches = {};
+    try {
+      const matchesDbPath = path.resolve(process.cwd(), "data", "tender_folder_matches.json");
+      if (fs.existsSync(matchesDbPath)) {
+        folderMatches = JSON.parse(fs.readFileSync(matchesDbPath, "utf-8"));
+      }
+    } catch (err) {
+      console.warn("[WARNING] Failed to load tender folder matches:", err.message);
+    }
+
+    let boqCache = {};
+    try {
+      const dataDir = path.resolve(process.cwd(), "data");
+      boqCache = loadBoqCache(dataDir);
+    } catch (err) {
+      console.warn("[WARNING] Failed to load BoQ cache:", err.message);
+    }
+
+    // Fetch EMD DETAILS-BG sheet data
+    let bgRows = [];
+    try {
+      const bgRange = `'EMD DETAILS-BG'!A1:ZZ`;
+      const bgUrl = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/${encodeURIComponent(bgRange)}`;
+      console.log(`[${new Date().toLocaleTimeString()}] Fetching EMD DETAILS-BG sheet data...`);
+      const bgResponse = await fetch(bgUrl, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        }
+      });
+      if (bgResponse.ok) {
+        const bgData = await bgResponse.json();
+        bgRows = bgData.values || [];
+        console.log(`✓ Fetched ${bgRows.length} rows from EMD DETAILS-BG sheet.`);
+      } else {
+        const bgErrorText = await bgResponse.text();
+        console.warn(`[WARNING] Failed to fetch EMD DETAILS-BG sheet: ${bgErrorText}`);
+      }
+    } catch (bgErr) {
+      console.warn(`[WARNING] Error fetching EMD DETAILS-BG sheet: ${bgErr.message}`);
+    }
+
+    const statusCategoryMap = new Map();
+    if (statusCategoryRows.length > 1) {
+      const cHeaders = statusCategoryRows[0].map(h => h.trim().toLowerCase());
+      const tenderIdIdx = cHeaders.indexOf("tenderid");
+      const statusCategoryIdx = cHeaders.indexOf("statuscategory");
+      if (tenderIdIdx !== -1 && statusCategoryIdx !== -1) {
+        for (let i = 1; i < statusCategoryRows.length; i++) {
+          const sRow = statusCategoryRows[i];
+          if (sRow && sRow[tenderIdIdx] && sRow[statusCategoryIdx]) {
+            const rawId = String(sRow[tenderIdIdx]).trim();
+            const cleanId = rawId.toLowerCase().replace(/[^a-z0-9]/g, "");
+            statusCategoryMap.set(cleanId, String(sRow[statusCategoryIdx]).trim());
+          }
+        }
+      }
+    }
+
     // 3. Validate Header Schema with Robust Normalization
     const normalizeHeader = (h) => {
       if (!h) return "";
@@ -344,11 +713,6 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // Ignore rows without Docket No
-      if (docketIndex >= row.length || !row[docketIndex] || row[docketIndex].trim() === "") {
-        continue;
-      }
-
       const parsedRecord = parseRow(row, headerIndexMap, i + 1);
       records.push(parsedRecord);
     }
@@ -370,13 +734,29 @@ export default async function handler(req, res) {
 
       const refNoIdx = cHeaders.findIndex(h => cNormalizeHeader(h) === "tenderrefno");
       const attachmentUrlIdx = cHeaders.findIndex(h => cNormalizeHeader(h) === "attachmenturl");
+      const docketNoIdx = cHeaders.findIndex(h => cNormalizeHeader(h) === "docketno");
+      const tenderTypeNameIdx = cHeaders.findIndex(h => cNormalizeHeader(h) === "tendertypename");
 
       if (refNoIdx === -1 || attachmentUrlIdx === -1) {
         console.warn(`[AttachmentJoin] Warning: Costing Sheet headers mismatch.`);
-        return tenders.map(t => ({ ...t, attachmentUrl: null }));
+        return tenders.map(t => ({ ...t, attachmentUrl: null, itemCategory: null }));
       }
 
-      // Build active list of costing records with cleaned references
+      // Helper function to extract numeric docket number
+      const extractDocketNumber = (docketStr) => {
+        if (!docketStr) return null;
+        // Match specific patterns: ENQ-18970-25-26 -> 18970, or extract first sequence of 4-6 digits
+        const match = docketStr.match(/(?:ENQ|ENG|ENC|FNO)[-_](\d+)/i) || docketStr.match(/(\d{4,6})/);
+        if (match) {
+          const numStr = match[1];
+          if (/^\d+$/.test(numStr)) {
+            return numStr;
+          }
+        }
+        return null;
+      };
+
+      // Build active list of costing records with cleaned references and extracted dockets
       const costingList = [];
       for (let i = 1; i < costing.length; i++) {
         const cRow = costing[i];
@@ -384,14 +764,26 @@ export default async function handler(req, res) {
 
         const rawRefNo = refNoIdx < cRow.length ? cRow[refNoIdx] : "";
         const rawUrl = attachmentUrlIdx < cRow.length ? cRow[attachmentUrlIdx] : "";
+        const rawCostingDocket = (docketNoIdx !== -1 && docketNoIdx < cRow.length) ? cRow[docketNoIdx] : "";
+        const rawItemCategory = (tenderTypeNameIdx !== -1 && tenderTypeNameIdx < cRow.length) ? cRow[tenderTypeNameIdx] : "";
 
         if (!rawRefNo || !rawUrl || rawUrl.trim() === "-" || rawUrl.trim() === "") continue;
+
+        let extractedDocket = null;
+        if (rawCostingDocket && rawCostingDocket.trim() !== "" && rawCostingDocket.trim() !== "-") {
+          extractedDocket = extractDocketNumber(rawCostingDocket);
+          if (!extractedDocket) {
+            console.warn(`[DocketExtraction] Failed to extract numeric docket number from raw costing value: "${rawCostingDocket}" at row ${i + 1}`);
+          }
+        }
 
         const url = rawUrl.trim();
         costingList.push({
           rawRefNo,
           cleanRef: cleanStr(rawRefNo),
-          url
+          url,
+          extractedDocket,
+          itemCategory: rawItemCategory ? rawItemCategory.trim() : null
         });
       }
 
@@ -400,6 +792,8 @@ export default async function handler(req, res) {
         const tenderNo = tender.tenderNoNitNo || "";
         const cleanTenderNo = cleanStr(tenderNo);
         let attachmentUrl = null;
+        let docketNo = tender.docketNo;
+        let itemCategory = null;
 
         if (cleanTenderNo !== "") {
           // 1. Try exact match on clean alphanumeric strings
@@ -412,21 +806,102 @@ export default async function handler(req, res) {
 
           if (match) {
             attachmentUrl = match.url;
+            if (match.extractedDocket) {
+              docketNo = match.extractedDocket;
+            } else {
+              docketNo = "-";
+            }
+            itemCategory = match.itemCategory;
             matchCount++;
+          } else {
+            // Unmatched tenders should not show date-time docket numbers
+            docketNo = "-";
           }
+        } else {
+          docketNo = "-";
         }
 
         return {
           ...tender,
-          attachmentUrl
+          attachmentUrl,
+          docketNo,
+          itemCategory
         };
       });
     };
 
     const rawEnrichedRecords = joinCostingData(records, costingRows);
 
+    // Parse BG Rows
+    const bgMap = [];
+    if (bgRows.length > 1) {
+      const bgHeaders = bgRows[0].map(h => h.trim().toLowerCase());
+      const bgNoIdx = bgHeaders.indexOf("bg no");
+      const remarkIdx = bgHeaders.indexOf("remark");
+      const statusIdx = bgHeaders.indexOf("status");
+
+      if (bgNoIdx !== -1 && statusIdx !== -1) {
+        for (let i = 1; i < bgRows.length; i++) {
+          const row = bgRows[i];
+          if (row && row.length > Math.max(bgNoIdx, statusIdx)) {
+            const bgNo = String(row[bgNoIdx] || "").trim();
+            const remark = remarkIdx !== -1 ? String(row[remarkIdx] || "").trim() : "";
+            const status = String(row[statusIdx] || "").trim();
+            
+            bgMap.push({
+              bgNo,
+              cleanBgNo: bgNo.toLowerCase().replace(/[^a-z0-9]/g, ""),
+              remark,
+              cleanRemark: remark.toLowerCase().replace(/[^a-z0-9]/g, ""),
+              status
+            });
+          }
+        }
+      }
+    }
+
     // 5. Fetch and parse costing Excel details for matched records
     const enrichedRecords = await Promise.all(rawEnrichedRecords.map(async (tender) => {
+      const cleanTenderNo = (tender.tenderNoNitNo || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      const statusCategory = statusCategoryMap.get(cleanTenderNo) || "";
+
+      // Find match in BoQ cache by Tender ID matching
+      let matchedBoq = null;
+      if (cleanTenderNo) {
+        matchedBoq = Object.values(boqCache).find(b => {
+          if (!b.cleanTenderId) return false;
+          return cleanTenderNo.includes(b.cleanTenderId) || b.cleanTenderId.includes(cleanTenderNo);
+        });
+      }
+
+      const match = folderMatches[tender.docketNo];
+      const folderPath = (match && match.folderFound) ? match.folderPath : null;
+
+      const competitors = matchedBoq ? matchedBoq.competitors : "";
+      const hasBoqChart = !!matchedBoq;
+      const fileCount = matchedBoq ? getFileCount(matchedBoq.parentFolderPath) : getFileCount(folderPath);
+
+      // EMD Details BG Match
+      let bgStatus = "";
+      const rawBgNo = tender.bgNoUtrNo || "";
+      const cleanDashBg = rawBgNo.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+      let bgMatch = null;
+      if (cleanDashBg) {
+        bgMatch = bgMap.find(b => b.cleanBgNo && (cleanDashBg.includes(b.cleanBgNo) || b.cleanBgNo.includes(cleanDashBg)));
+      }
+
+      if (!bgMatch && cleanTenderNo) {
+        bgMatch = bgMap.find(b => {
+          if (!b.cleanRemark) return false;
+          return cleanTenderNo.includes(b.cleanRemark) || b.cleanRemark.includes(cleanTenderNo);
+        });
+      }
+
+      if (bgMatch) {
+        bgStatus = bgMatch.status;
+      }
+
       if (tender.attachmentUrl) {
         const details = await getCostingDetails(tender.attachmentUrl, tender.docketNo);
         if (details) {
@@ -440,7 +915,15 @@ export default async function handler(req, res) {
             htXlpePrice: details.prices.htXlpe,
             pvcTypeSt2Price: details.prices.pvcTypeSt2,
             galvanisedSteelFlatStripPrice: details.prices.galvanisedSteelFlatStrip,
-            fillerPrice: details.prices.filler
+            fillerPrice: details.prices.filler,
+            proposedErpItemName: details.proposedErpItemName || "",
+            proposedQty: details.proposedQty || "",
+            statusCategory,
+            itemCategory: tender.itemCategory || null,
+            competitors: competitors || "",
+            fileCount,
+            hasBoqChart,
+            bgStatus
           };
         }
       }
@@ -456,7 +939,15 @@ export default async function handler(req, res) {
         htXlpePrice: null,
         pvcTypeSt2Price: null,
         galvanisedSteelFlatStripPrice: null,
-        fillerPrice: null
+        fillerPrice: null,
+        proposedErpItemName: "",
+        proposedQty: "",
+        statusCategory,
+        itemCategory: tender.itemCategory || null,
+        competitors: competitors || "",
+        fileCount,
+        hasBoqChart,
+        bgStatus
       };
     }));
 
@@ -554,58 +1045,8 @@ function parseRow(row, headerMap, rowNum) {
   };
 
   const mapStatus = (status) => {
-    if (!status) return "In Preparation";
-    const normalized = status.trim().toLowerCase();
-    if (
-      normalized.includes("awarded") || 
-      normalized.includes("won") || 
-      normalized.includes("l1") || 
-      normalized.includes("po received") || 
-      normalized.includes("loi received")
-    ) {
-      return "Won";
-    }
-    if (
-      normalized.includes("not in our favour") || 
-      normalized.includes("lost") || 
-      normalized.includes("l2") || 
-      normalized.includes("l3") ||
-      normalized.includes("rejected") ||
-      normalized.includes("not participated")
-    ) {
-      return "Lost";
-    }
-    if (
-      normalized.includes("technical bid opened") || 
-      normalized.includes("financial evaluation") || 
-      normalized.includes("under evaluation") || 
-      normalized.includes("not evaluated") ||
-      normalized.includes("evaluation") ||
-      normalized.includes("date extended") ||
-      normalized.includes("submitted") ||
-      normalized.includes("tender opened")
-    ) {
-      return "Under Evaluation";
-    }
-    if (
-      normalized.includes("ra pending") || 
-      normalized.includes("reverse auction") ||
-      normalized.includes("ra scheduled")
-    ) {
-      return "RA Pending";
-    }
-    if (normalized.includes("cancelled") || normalized.includes("canceled")) {
-      return "Cancelled";
-    }
-    if (
-      normalized.includes("preparation") || 
-      normalized.includes("prep") || 
-      normalized.includes("under preparation") ||
-      normalized.includes("in preparation")
-    ) {
-      return "In Preparation";
-    }
-    return "Under Evaluation";
+    if (!status || status.trim() === "" || status.trim() === "-") return "";
+    return status.trim();
   };
 
   const parseDate = (val) => {
@@ -670,7 +1111,7 @@ function parseRow(row, headerMap, rowNum) {
     tenderSubmittedDate: parseDate(getValue("Tender Submitted Date")),
     reverseAuctionApplicable: parseBool(getValue("Reverse Auction Applicable")),
     reverseAuctionDate: parseDate(getValue("Reverse Auction Date")),
-    emdPaymentMode: getValue("EMD Payment Through BG / NEFT") || "Not Applicable",
+    emdPaymentMode: getValue("EMD Payment Through BG / NEFT") || "",
     bgNoUtrNo: getValue("BG No / UTR No") || null,
     emdValidity: parseDate(getValue("EMD Validity")),
     loiPoNoAndDate: getValue("LOI / PO No & Date") || null,
@@ -682,3 +1123,5 @@ function parseRow(row, headerMap, rowNum) {
     finalRemarks: getValue("Final Remarks") || null
   };
 }
+
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.

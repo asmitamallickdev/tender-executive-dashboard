@@ -400,7 +400,7 @@ export const generateMockTenders = (): EpcTenderRecord[] => {
   if (diffEmd !== 0 && records.length > 10) {
     // Add the difference to a random active record to balance the sum exactly
     const activeRecs = records.filter(r => 
-      [CurrentStatus.SUBMITTED, CurrentStatus.UNDER_EVALUATION, CurrentStatus.RA_PENDING].includes(r.currentStatus) && 
+      [CurrentStatus.SUBMITTED, CurrentStatus.UNDER_EVALUATION, CurrentStatus.RA_PENDING].includes(r.currentStatus as any) && 
       r.slNo > 5
     );
     if (activeRecs.length > 0) {

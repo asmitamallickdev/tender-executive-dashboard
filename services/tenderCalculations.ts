@@ -1,5 +1,27 @@
 import { EpcTenderRecord, CurrentStatus } from "../types/tender";
 
+function isRecordStatusActive(status: string): boolean {
+  if (!status) return false;
+  const lower = status.toLowerCase();
+  if (
+    lower.includes("awarded") || 
+    lower.includes("won") || 
+    lower.includes("po received") || 
+    lower.includes("loi received") ||
+    lower.includes("not in our favour") || 
+    lower.includes("lost") || 
+    lower.includes("rejected") ||
+    lower.includes("not participated") ||
+    lower.includes("cancelled") ||
+    lower.includes("canceled") ||
+    lower.includes("preparation") || 
+    lower.includes("prep")
+  ) {
+    return false; // Inactive (Won, Lost, Cancelled, In Preparation)
+  }
+  return true; // Active (Submitted, Under Evaluation, RA Pending, etc.)
+}
+
 export interface DashboardMetrics {
   totalSubmittedTenders: number;
   totalSubmittedValueRs: number;
@@ -55,26 +77,7 @@ export class TenderCalculations {
    * - Tender Submitted Date <= Today
    */
   public getPrimaryDataset(): EpcTenderRecord[] {
-    const startDate = new Date("2026-01-01T00:00:00");
-    
-    // Set today to end of day to include submissions made today
-    const endOfToday = new Date(this.today);
-    endOfToday.setHours(23, 59, 59, 999);
-
-    return this.rawRecords.filter(record => {
-      // 1. If it has a costing sheet match (common to both), always include it
-      if (record.attachmentUrl) {
-        return true;
-      }
-      
-      // 2. Otherwise, filter by Last Date of Submission falling in the 2026-present window
-      if (!record.lastDateOfSubmission) {
-        return false;
-      }
-      
-      const deadlineDate = new Date(record.lastDateOfSubmission);
-      return deadlineDate >= startDate && deadlineDate <= endOfToday;
-    });
+    return this.rawRecords;
   }
 
   /**
@@ -125,11 +128,7 @@ export class TenderCalculations {
       }
 
       // 5. Calculate EMD Exposure (Sum EMD for active/pending statuses)
-      const isActiveStatus = [
-        CurrentStatus.SUBMITTED,
-        CurrentStatus.UNDER_EVALUATION,
-        CurrentStatus.RA_PENDING
-      ].includes(record.currentStatus);
+      const isActiveStatus = isRecordStatusActive(record.currentStatus);
 
       if (isActiveStatus && record.emdAmountRs !== null) {
         emdExposureRs += record.emdAmountRs;
@@ -305,11 +304,7 @@ export class TenderCalculations {
       }
 
       // 4. Under Evaluation > 90 Days (Status is active, but submitted > 90 days ago)
-      const isActiveStatus = [
-        CurrentStatus.SUBMITTED,
-        CurrentStatus.UNDER_EVALUATION,
-        CurrentStatus.RA_PENDING
-      ].includes(record.currentStatus);
+      const isActiveStatus = isRecordStatusActive(record.currentStatus);
 
       if (isActiveStatus && record.lastDateOfSubmission) {
         const deadlineMs = new Date(record.lastDateOfSubmission).getTime();
@@ -320,7 +315,8 @@ export class TenderCalculations {
 
       // 5. LOI Received (PO Pending)
       // Status is WON (LOI Received) but PO Number/Date is not yet issued (is null/empty or does not contain "PO")
-      const isWon = record.currentStatus === CurrentStatus.WON;
+      const lowerStatus = record.currentStatus.toLowerCase();
+      const isWon = lowerStatus.includes("awarded") || lowerStatus.includes("won");
       const isPoPending = !record.loiPoNoAndDate || 
         record.loiPoNoAndDate.trim() === "" || 
         record.loiPoNoAndDate.trim() === "-" ||

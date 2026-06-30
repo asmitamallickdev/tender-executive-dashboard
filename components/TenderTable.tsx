@@ -1,52 +1,378 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
-import { EpcTenderRecord, CurrentStatus, ManagementDecision } from "../types/tender";
+import { EpcTenderRecord, ManagementDecision, EMDExchangeMode } from "../types/tender";
+import { AttachmentModal } from "./AttachmentModal";
 import "./TenderTable.css";
+
+const filesCache = new Map<string, any[]>();
+const filesPromiseCache = new Map<string, Promise<any[]>>();
+
+const fetchDocketFiles = (docketNo: string): Promise<any[]> => {
+  if (filesCache.has(docketNo)) {
+    return Promise.resolve(filesCache.get(docketNo)!);
+  }
+  if (filesPromiseCache.has(docketNo)) {
+    return filesPromiseCache.get(docketNo)!;
+  }
+  const promise = fetch(`/api/tenders/${docketNo}/files`, {
+    headers: {
+      Authorization: "Bearer MOCK_TOKEN_LASERPOWER_SECURE_AUTH_SCOPE"
+    }
+  })
+    .then(res => res.ok ? res.json() : { files: [] })
+    .then(data => {
+      const files = data.files || [];
+      filesCache.set(docketNo, files);
+      filesPromiseCache.delete(docketNo);
+      return files;
+    })
+    .catch(() => {
+      return [];
+    });
+  filesPromiseCache.set(docketNo, promise);
+  return promise;
+};
+
+const FilesCell: React.FC<{
+  docketNo: string;
+  onOpenModal: (docket: string) => void;
+}> = ({ docketNo, onOpenModal }) => {
+  const [files, setFiles] = useState<any[] | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!docketNo || docketNo === "-") return;
+    
+    let isMounted = true;
+    setLoading(true);
+    fetchDocketFiles(docketNo).then(data => {
+      if (isMounted) {
+        setFiles(data);
+        setLoading(false);
+      }
+    });
+    return () => { isMounted = false; };
+  }, [docketNo]);
+
+  if (loading || !files || files.length === 0) {
+    return null; // Empty
+  }
+
+  return (
+    <button 
+      className="table-attachment-btn" 
+      onClick={() => onOpenModal(docketNo)}
+      title="View files in folder"
+    >
+      📎 {files.length} {files.length === 1 ? "File" : "Files"}
+    </button>
+  );
+};
+
+const BOQChartCell: React.FC<{
+  docketNo: string;
+}> = ({ docketNo }) => {
+  const [boqFile, setBoqFile] = useState<any | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!docketNo || docketNo === "-") return;
+    
+    let isMounted = true;
+    setLoading(true);
+    fetchDocketFiles(docketNo).then(files => {
+      if (isMounted) {
+        const match = files.find(f => {
+          const lower = f.filename.toLowerCase();
+          return lower.includes("boqcomparativechart") || 
+                 lower.includes("boq_comparative") || 
+                 lower.includes("boq comparative");
+        });
+        setBoqFile(match || null);
+        setLoading(false);
+      }
+    });
+    return () => { isMounted = false; };
+  }, [docketNo]);
+
+  if (loading || !boqFile) {
+    return null; // Empty
+  }
+
+  const handleDownload = () => {
+    const token = "Bearer MOCK_TOKEN_LASERPOWER_SECURE_AUTH_SCOPE";
+    window.open(`/api/files/download/${boqFile.fileId}?auth=${encodeURIComponent(token)}`, "_blank");
+  };
+
+  return (
+    <button 
+      className="table-boq-btn" 
+      onClick={handleDownload}
+      title={`Download ${boqFile.filename}`}
+    >
+      📊 Comparative Chart
+    </button>
+  );
+};
 
 interface TenderTableProps {
   records: EpcTenderRecord[];
+  priceBasisFilter?: string;
+  setPriceBasisFilter?: (val: string) => void;
+  aluminiumMin?: string;
+  setAluminiumMin?: (val: string) => void;
+  aluminiumMax?: string;
+  setAluminiumMax?: (val: string) => void;
+  copperMin?: string;
+  setCopperMin?: (val: string) => void;
+  copperMax?: string;
+  setCopperMax?: (val: string) => void;
 }
 
 interface ColumnDef {
   header: string;
-  accessor: keyof EpcTenderRecord | "rawMaterials";
+  accessor: keyof EpcTenderRecord | "rawMaterials" | "files" | "boqChart";
   defaultWidth: number;
   align: "left" | "right" | "center";
   type: "string" | "number" | "date" | "boolean" | "percentage" | "currency" | "status" | "decision" | "custom";
 }
 
-export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
+export const TenderTable: React.FC<TenderTableProps> = ({ 
+  records,
+  priceBasisFilter,
+  setPriceBasisFilter,
+  aluminiumMin,
+  setAluminiumMin,
+  aluminiumMax,
+  setAluminiumMax,
+  copperMin,
+  setCopperMin,
+  copperMax,
+  setCopperMax
+}) => {
   // 1. Column Definitions
   const columns: ColumnDef[] = [
     { header: "Docket No", accessor: "docketNo", defaultWidth: 120, align: "left", type: "string" },
     { header: "Last Date of Submission", accessor: "lastDateOfSubmission", defaultWidth: 200, align: "center", type: "date" },
     { header: "Client Name", accessor: "nameOfTheClient", defaultWidth: 200, align: "left", type: "string" },
     { header: "Tender / NIT No", accessor: "tenderNoNitNo", defaultWidth: 180, align: "left", type: "string" },
+    { header: "Item Category", accessor: "itemCategory", defaultWidth: 150, align: "left", type: "string" },
+    { header: "Proposed ERP Item Name", accessor: "proposedErpItemName", defaultWidth: 250, align: "left", type: "custom" },
+    { header: "Proposed Qty", accessor: "proposedQty", defaultWidth: 120, align: "left", type: "custom" },
     { header: "Attachment", accessor: "attachmentUrl", defaultWidth: 115, align: "center", type: "string" },
-    { header: "Tender For", accessor: "tenderFor", defaultWidth: 150, align: "left", type: "string" },
+    { header: "Files", accessor: "files", defaultWidth: 115, align: "center", type: "custom" },
+    { header: "Comparative Chart", accessor: "boqChart", defaultWidth: 120, align: "center", type: "custom" },
     { header: "Type", accessor: "typeOfTender", defaultWidth: 100, align: "left", type: "string" },
-    { header: "Est. Cost (₹)", accessor: "estimatedCostRs", defaultWidth: 140, align: "right", type: "currency" },
     { header: "Price", accessor: "priceBasis", defaultWidth: 90, align: "center", type: "string" },
     { header: "Raw Materials", accessor: "rawMaterials", defaultWidth: 220, align: "center", type: "custom" },
-    { header: "EMD Amount", accessor: "emdAmountRs", defaultWidth: 120, align: "right", type: "currency" },
+    { header: "EMD Payment Mode", accessor: "emdPaymentMode", defaultWidth: 150, align: "center", type: "string" },
+    { header: "BG / UTR No", accessor: "bgNoUtrNo", defaultWidth: 150, align: "left", type: "string" },
+    { header: "BG Status", accessor: "bgStatus", defaultWidth: 110, align: "center", type: "string" },
     { header: "Current Status", accessor: "currentStatus", defaultWidth: 150, align: "center", type: "status" },
+    { header: "Status Category", accessor: "statusCategory", defaultWidth: 150, align: "center", type: "string" },
     { header: "Mgmt Dec.", accessor: "managementDecision", defaultWidth: 100, align: "center", type: "decision" },
+    { header: "Participated?", accessor: "participated", defaultWidth: 100, align: "center", type: "boolean" },
     { header: "Prep By", accessor: "tenderPrepareBy", defaultWidth: 120, align: "left", type: "string" },
     { header: "RA?", accessor: "reverseAuctionApplicable", defaultWidth: 60, align: "center", type: "boolean" },
     { header: "LOI / PO No.", accessor: "loiPoNoAndDate", defaultWidth: 150, align: "left", type: "string" },
     { header: "Diff L1 (%)", accessor: "diffPercentFromL1", defaultWidth: 100, align: "right", type: "percentage" },
     { header: "Diff L2 (%)", accessor: "diffPercentFromL2", defaultWidth: 100, align: "right", type: "percentage" },
+    { header: "Competitors", accessor: "competitors", defaultWidth: 250, align: "left", type: "custom" },
+    { header: "Remarks", accessor: "remarks", defaultWidth: 200, align: "left", type: "string" },
   ];
 
   // 2. States
   const [globalSearch, setGlobalSearch] = useState<string>("");
+  const [sortColumn, setSortColumn] = useState<keyof EpcTenderRecord | "rawMaterials" | "files" | "boqChart" | null>("lastDateOfSubmission");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+  const [startDate, setStartDate] = useState<string>("");
+  const [endDate, setEndDate] = useState<string>("");
+
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [rowsPerPage, setRowsPerPage] = useState<number>(50);
   
-  const [sortColumn, setSortColumn] = useState<keyof EpcTenderRecord | "rawMaterials" | null>("lastDateOfSubmission");
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+  const [selectedDocketNo, setSelectedDocketNo] = useState<string>("");
+  const [isAttachmentModalOpen, setIsAttachmentModalOpen] = useState<boolean>(false);
+  const [statusHeaderFilter, setStatusHeaderFilter] = useState<string>("All");
+  const [decisionHeaderFilter, setDecisionHeaderFilter] = useState<string>("All");
+  const [emdPaymentHeaderFilter, setEmdPaymentHeaderFilter] = useState<string>("All");
+  const [tenderForHeaderFilter, setTenderForHeaderFilter] = useState<string>("All");
+  const [typeHeaderFilter, setTypeHeaderFilter] = useState<string>("All");
+  const [prepareByHeaderFilter, setPrepareByHeaderFilter] = useState<string>("All");
+  const [raHeaderFilter, setRaHeaderFilter] = useState<string>("All");
+  const [participatedHeaderFilter, setParticipatedHeaderFilter] = useState<string>("All");
+  const [statusCategoryHeaderFilter, setStatusCategoryHeaderFilter] = useState<string>("All");
+  const [itemCategoryHeaderFilter, setItemCategoryHeaderFilter] = useState<string>("All");
+  const [bgStatusHeaderFilter, setBgStatusHeaderFilter] = useState<string>("All");
+  const [remarksTextFilter, setRemarksTextFilter] = useState<string>("");
+  const [remarksDropdownFilter, setRemarksDropdownFilter] = useState<string>("All");
 
-  const [startDate, setStartDate] = useState<string>("");
-  const [endDate, setEndDate] = useState<string>("");
+  // Helper for cascading dependent filters
+
+  // Helper for cascading dependent filters
+  const getFilteredRecordsExcept = (excludeAccessor: string | null) => {
+    let result = [...records];
+
+    if (globalSearch.trim() !== "") {
+      const searchLower = globalSearch.toLowerCase().trim();
+      result = result.filter(record => {
+        const docNo = record.docketNo || "";
+        const client = record.nameOfTheClient || "";
+        const nit = record.tenderNoNitNo || "";
+        const category = record.itemCategory || "";
+        const comps = record.competitors || "";
+        return docNo.toLowerCase().includes(searchLower) ||
+               client.toLowerCase().includes(searchLower) ||
+               nit.toLowerCase().includes(searchLower) ||
+               category.toLowerCase().includes(searchLower) ||
+               comps.toLowerCase().includes(searchLower);
+      });
+    }
+
+    if (startDate) {
+      result = result.filter(record => record.lastDateOfSubmission && new Date(record.lastDateOfSubmission) >= new Date(startDate));
+    }
+    if (endDate) {
+      result = result.filter(record => record.lastDateOfSubmission && new Date(record.lastDateOfSubmission) <= new Date(endDate));
+    }
+
+    if (excludeAccessor !== "currentStatus" && statusHeaderFilter !== "All") {
+      result = result.filter(record => record.currentStatus === statusHeaderFilter);
+    }
+    if (excludeAccessor !== "managementDecision" && decisionHeaderFilter !== "All") {
+      result = result.filter(record => record.managementDecision === decisionHeaderFilter);
+    }
+    if (excludeAccessor !== "emdPaymentMode" && emdPaymentHeaderFilter !== "All") {
+      result = result.filter(record => record.emdPaymentMode === emdPaymentHeaderFilter);
+    }
+    if (excludeAccessor !== "tenderFor" && tenderForHeaderFilter !== "All") {
+      result = result.filter(record => record.tenderFor === tenderForHeaderFilter);
+    }
+    if (excludeAccessor !== "typeOfTender" && typeHeaderFilter !== "All") {
+      result = result.filter(record => record.typeOfTender === typeHeaderFilter);
+    }
+    if (excludeAccessor !== "tenderPrepareBy" && prepareByHeaderFilter !== "All") {
+      if (prepareByHeaderFilter === "BLANK") {
+        result = result.filter(record => !record.tenderPrepareBy || record.tenderPrepareBy.trim() === "");
+      } else {
+        result = result.filter(record => record.tenderPrepareBy === prepareByHeaderFilter);
+      }
+    }
+    if (excludeAccessor !== "reverseAuctionApplicable" && raHeaderFilter !== "All") {
+      const isRa = raHeaderFilter === "YES";
+      result = result.filter(record => record.reverseAuctionApplicable === isRa);
+    }
+    if (excludeAccessor !== "participated" && participatedHeaderFilter !== "All") {
+      const isPart = participatedHeaderFilter === "YES";
+      result = result.filter(record => record.participated === isPart);
+    }
+    if (excludeAccessor !== "statusCategory" && statusCategoryHeaderFilter !== "All") {
+      if (statusCategoryHeaderFilter === "BLANK") {
+        result = result.filter(record => !record.statusCategory || record.statusCategory.trim() === "");
+      } else {
+        result = result.filter(record => record.statusCategory === statusCategoryHeaderFilter);
+      }
+    }
+    if (excludeAccessor !== "itemCategory" && itemCategoryHeaderFilter !== "All") {
+      result = result.filter(record => record.itemCategory === itemCategoryHeaderFilter);
+    }
+    if (excludeAccessor !== "remarks" && remarksDropdownFilter !== "All") {
+      result = result.filter(record => record.remarks === remarksDropdownFilter);
+    }
+    if (excludeAccessor !== "bgStatus" && bgStatusHeaderFilter !== "All") {
+      if (bgStatusHeaderFilter === "BLANK") {
+        result = result.filter(record => !record.bgStatus || record.bgStatus.trim() === "");
+      } else {
+        result = result.filter(record => record.bgStatus === bgStatusHeaderFilter);
+      }
+    }
+
+    return result;
+  };
+
+  const uniqueBgStatuses = useMemo(() => {
+    const filtered = getFilteredRecordsExcept("bgStatus");
+    const list = filtered
+      .map(r => r.bgStatus)
+      .filter((s): s is string => !!s && s.trim() !== "");
+    return Array.from(new Set(list)).sort();
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter]);
+
+  const uniqueRemarks = useMemo(() => {
+    const filtered = getFilteredRecordsExcept("remarks");
+    const counts: Record<string, number> = {};
+    filtered.forEach(r => {
+      const val = r.remarks ? r.remarks.trim() : "";
+      if (val) {
+        counts[val] = (counts[val] || 0) + 1;
+      }
+    });
+    return Object.keys(counts)
+      .filter(key => counts[key] > 1)
+      .sort();
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, bgStatusHeaderFilter]);
+
+  const uniqueStatuses = useMemo(() => {
+    const filtered = getFilteredRecordsExcept("currentStatus");
+    const statuses = filtered
+      .map(r => r.currentStatus)
+      .filter((s): s is string => !!s && s.trim() !== "");
+    return Array.from(new Set(statuses)).sort();
+  }, [records, globalSearch, startDate, endDate, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+
+  const uniqueStatusCategories = useMemo(() => {
+    const filtered = getFilteredRecordsExcept("statusCategory");
+    const categories = filtered
+      .map(r => r.statusCategory)
+      .filter((s): s is string => !!s && s.trim() !== "");
+    return Array.from(new Set(categories)).sort();
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+
+  const uniqueEmdPaymentModes = useMemo(() => {
+    const filtered = getFilteredRecordsExcept("emdPaymentMode");
+    const modes = filtered
+      .map(r => r.emdPaymentMode)
+      .filter((m): m is EMDExchangeMode => m !== null && m !== undefined);
+    return Array.from(new Set(modes)).sort();
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+
+  const uniqueTenderFor = useMemo(() => {
+    const filtered = getFilteredRecordsExcept("tenderFor");
+    const list = filtered
+      .map(r => r.tenderFor)
+      .filter((s): s is string => !!s && s.trim() !== "");
+    return Array.from(new Set(list)).sort();
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+
+  const uniqueTypes = useMemo(() => {
+    const filtered = getFilteredRecordsExcept("typeOfTender");
+    const list = filtered
+      .map(r => r.typeOfTender)
+      .filter((s): s is string => !!s && s.trim() !== "");
+    return Array.from(new Set(list)).sort();
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+
+  const uniqueItemCategories = useMemo(() => {
+    const filtered = getFilteredRecordsExcept("itemCategory");
+    const list = filtered
+      .map(r => r.itemCategory)
+      .filter((s): s is string => !!s && s.trim() !== "");
+    return Array.from(new Set(list)).sort();
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+
+  const uniquePrepareBy = useMemo(() => {
+    const filtered = getFilteredRecordsExcept("tenderPrepareBy");
+    const list = filtered
+      .map(r => r.tenderPrepareBy)
+      .filter((s): s is string => !!s && s.trim() !== "");
+    return Array.from(new Set(list)).sort();
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+
+  const handleOpenAttachmentModal = (docketNo: string) => {
+    setSelectedDocketNo(docketNo);
+    setIsAttachmentModalOpen(true);
+  };
+  
+
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
     const initialWidths: Record<string, number> = {};
@@ -96,8 +422,8 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
   };
 
   // 4. Sorting Handler
-  const handleSort = (column: keyof EpcTenderRecord | "rawMaterials") => {
-    if (column === "rawMaterials") return; // Skip sorting on custom virtual column
+  const handleSort = (column: keyof EpcTenderRecord | "rawMaterials" | "files" | "boqChart") => {
+    if (column === "rawMaterials") return; // Skip sorting on custom rawMaterials column
     if (sortColumn === column) {
       setSortDirection(prev => (prev === "asc" ? "desc" : "asc"));
     } else {
@@ -130,7 +456,9 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
           record.tenderFor.toLowerCase().includes(searchLower) ||
           record.tenderPrepareBy.toLowerCase().includes(searchLower) ||
           record.currentStatus.toLowerCase().includes(searchLower) ||
+          (record.itemCategory && record.itemCategory.toLowerCase().includes(searchLower)) ||
           (record.remarks && record.remarks.toLowerCase().includes(searchLower)) ||
+          (record.competitors && record.competitors.toLowerCase().includes(searchLower)) ||
           (record.nameOfWorkDescription && record.nameOfWorkDescription.toLowerCase().includes(searchLower))
         );
       });
@@ -165,10 +493,23 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
     // Sorting
     if (sortColumn) {
       result.sort((a, b) => {
-        if (sortColumn === "rawMaterials") return 0; // Skip sorting on custom virtual column
-        const valA = a[sortColumn];
-        const valB = b[sortColumn];
+        if (sortColumn === "rawMaterials") return 0; // Skip sorting on rawMaterials custom virtual column
+        
+        let valA: any;
+        let valB: any;
 
+        if (sortColumn === "files") {
+          valA = a.fileCount !== undefined ? a.fileCount : 0;
+          valB = b.fileCount !== undefined ? b.fileCount : 0;
+        } else if (sortColumn === "boqChart") {
+          valA = a.hasBoqChart ? 1 : 0;
+          valB = b.hasBoqChart ? 1 : 0;
+        } else {
+          valA = a[sortColumn as keyof EpcTenderRecord];
+          valB = b[sortColumn as keyof EpcTenderRecord];
+        }
+
+        if (valA === valB) return 0;
         if (valA === null || valA === undefined) return sortDirection === "asc" ? -1 : 1;
         if (valB === null || valB === undefined) return sortDirection === "asc" ? 1 : -1;
 
@@ -189,8 +530,91 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
       });
     }
 
+    // Column Status Header Filter
+    if (statusHeaderFilter !== "All") {
+      result = result.filter(record => record.currentStatus === statusHeaderFilter);
+    }
+
+    // Column Management Decision Header Filter
+    if (decisionHeaderFilter !== "All") {
+      result = result.filter(record => record.managementDecision === decisionHeaderFilter);
+    }
+
+    // Column EMD Payment Mode Header Filter
+    if (emdPaymentHeaderFilter !== "All") {
+      result = result.filter(record => record.emdPaymentMode === emdPaymentHeaderFilter);
+    }
+
+    // Column Tender For Header Filter
+    if (tenderForHeaderFilter !== "All") {
+      result = result.filter(record => record.tenderFor === tenderForHeaderFilter);
+    }
+
+    // Column Type Header Filter
+    if (typeHeaderFilter !== "All") {
+      result = result.filter(record => record.typeOfTender === typeHeaderFilter);
+    }
+
+    // Column Prepare By Header Filter
+    if (prepareByHeaderFilter !== "All") {
+      if (prepareByHeaderFilter === "BLANK") {
+        result = result.filter(record => !record.tenderPrepareBy || record.tenderPrepareBy.trim() === "");
+      } else {
+        result = result.filter(record => record.tenderPrepareBy === prepareByHeaderFilter);
+      }
+    }
+
+    // Column RA? Header Filter
+    if (raHeaderFilter !== "All") {
+      const isRa = raHeaderFilter === "YES";
+      result = result.filter(record => record.reverseAuctionApplicable === isRa);
+    }
+
+    // Column Participated? Header Filter
+    if (participatedHeaderFilter !== "All") {
+      const isPart = participatedHeaderFilter === "YES";
+      result = result.filter(record => record.participated === isPart);
+    }
+
+    // Column Status Category Header Filter
+    if (statusCategoryHeaderFilter !== "All") {
+      if (statusCategoryHeaderFilter === "BLANK") {
+        result = result.filter(record => !record.statusCategory || record.statusCategory.trim() === "");
+      } else {
+        result = result.filter(record => record.statusCategory === statusCategoryHeaderFilter);
+      }
+    }
+
+    // Column Item Category Header Filter
+    if (itemCategoryHeaderFilter !== "All") {
+      result = result.filter(record => record.itemCategory === itemCategoryHeaderFilter);
+    }
+
+    // Column BG Status Header Filter
+    if (bgStatusHeaderFilter !== "All") {
+      if (bgStatusHeaderFilter === "BLANK") {
+        result = result.filter(record => !record.bgStatus || record.bgStatus.trim() === "");
+      } else {
+        result = result.filter(record => record.bgStatus === bgStatusHeaderFilter);
+      }
+    }
+
+    // Column Remarks Header Filters
+    if (remarksDropdownFilter !== "All") {
+      result = result.filter(record => record.remarks === remarksDropdownFilter);
+    }
+    if (remarksTextFilter.trim() !== "") {
+      const searchLower = remarksTextFilter.toLowerCase().trim();
+      result = result.filter(record => record.remarks && record.remarks.toLowerCase().includes(searchLower));
+    }
+
     return result;
-  }, [records, globalSearch, sortColumn, sortDirection, startDate, endDate]);
+  }, [
+    records, globalSearch, sortColumn, sortDirection, startDate, endDate, 
+    statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter,
+    tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter,
+    statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksTextFilter, remarksDropdownFilter, bgStatusHeaderFilter
+  ]);
 
   // 6. Pagination Calculations
   const totalRecords = processedRecords.length;
@@ -348,16 +772,54 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
     return `${prefix}${(val * 100).toFixed(1)}%`;
   };
 
-  const getStatusClass = (status: CurrentStatus): string => {
-    switch (status) {
-      case CurrentStatus.WON: return "won";
-      case CurrentStatus.LOST: return "lost";
-      case CurrentStatus.UNDER_EVALUATION: return "eval";
-      case CurrentStatus.SUBMITTED: return "submitted";
-      case CurrentStatus.RA_PENDING: return "loi"; // Map RA Pending to alternate style
-      default: return "submitted";
+  const getStatusClass = (status: string): string => {
+    if (!status) return "submitted";
+    const lower = status.toLowerCase();
+    if (
+      lower.includes("awarded") || 
+      lower.includes("won") || 
+      lower.includes("l1") || 
+      lower.includes("po received") || 
+      lower.includes("loi received")
+    ) {
+      return "won";
     }
+    if (
+      lower.includes("not in our favour") || 
+      lower.includes("lost") || 
+      lower.includes("l2") || 
+      lower.includes("l3") ||
+      lower.includes("rejected") ||
+      lower.includes("not participated")
+    ) {
+      return "lost";
+    }
+    if (
+      lower.includes("technical bid opened") || 
+      lower.includes("financial evaluation") || 
+      lower.includes("under evaluation") || 
+      lower.includes("not evaluated") ||
+      lower.includes("evaluation") ||
+      lower.includes("date extended") ||
+      lower.includes("submitted") ||
+      lower.includes("tender opened")
+    ) {
+      return "eval";
+    }
+    if (
+      lower.includes("ra pending") || 
+      lower.includes("reverse auction") ||
+      lower.includes("ra scheduled")
+    ) {
+      return "loi";
+    }
+    if (lower.includes("cancelled") || lower.includes("canceled")) {
+      return "lost";
+    }
+    return "submitted"; // Default style
   };
+
+
 
   const getDecisionClass = (decision: ManagementDecision): string => {
     switch (decision) {
@@ -367,16 +829,12 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
     }
   };
 
-  const getLoiLabel = (status: CurrentStatus): string => {
-    return status === CurrentStatus.WON ? "WON" : status;
-  };
-
   return (
     <div className="tender-table-container">
       {/* 9. Header Toolbar */}
       <div className="tender-table-toolbar">
         <div className="toolbar-left">
-          <h2 className="table-title">Master Tender Participation Tracker (Jan 2026 - Present)</h2>
+          <h2 className="table-title">Master Tender Participation Tracker</h2>
           <span className="record-count-badge">{totalRecords} Records Total</span>
           <div className="global-search-container">
             <span className="search-icon">🔍</span>
@@ -456,6 +914,353 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
                       )}
                     </div>
                   )}
+                  {col.accessor === "priceBasis" && setPriceBasisFilter && (
+                    <div 
+                      className="column-price-basis-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="price-basis-filter-select"
+                        value={priceBasisFilter || "All"}
+                        onChange={(e) => setPriceBasisFilter(e.target.value)}
+                      >
+                        <option value="All">All</option>
+                        <option value="Firm">Firm</option>
+                        <option value="Variable">Variable</option>
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "bgStatus" && (
+                    <div 
+                      className="column-bg-status-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="bg-status-filter-select"
+                        value={bgStatusHeaderFilter}
+                        onChange={(e) => {
+                          setBgStatusHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All</option>
+                        <option value="BLANK">(Blank)</option>
+                        {uniqueBgStatuses.map(s => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "currentStatus" && (
+                    <div 
+                      className="column-status-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="status-filter-select"
+                        value={statusHeaderFilter}
+                        onChange={(e) => {
+                          setStatusHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All Statuses</option>
+                        {uniqueStatuses.map(status => (
+                          <option key={status} value={status}>
+                            {status}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "statusCategory" && (
+                    <div 
+                      className="column-status-category-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="status-category-filter-select"
+                        value={statusCategoryHeaderFilter}
+                        onChange={(e) => {
+                          setStatusCategoryHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All Categories</option>
+                        <option value="BLANK">(Blank)</option>
+                        {uniqueStatusCategories.map(cat => (
+                          <option key={cat} value={cat}>
+                            {cat}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "managementDecision" && (
+                    <div 
+                      className="column-decision-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="decision-filter-select"
+                        value={decisionHeaderFilter}
+                        onChange={(e) => {
+                          setDecisionHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All</option>
+                        <option value="YES">YES</option>
+                        <option value="NO">NO</option>
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "emdPaymentMode" && (
+                    <div 
+                      className="column-emd-payment-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="emd-payment-filter-select"
+                        value={emdPaymentHeaderFilter}
+                        onChange={(e) => {
+                          setEmdPaymentHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All</option>
+                        {uniqueEmdPaymentModes.map(mode => (
+                          <option key={mode} value={mode}>
+                            {mode}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "tenderFor" && (
+                    <div 
+                      className="column-tender-for-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="tender-for-filter-select"
+                        value={tenderForHeaderFilter}
+                        onChange={(e) => {
+                          setTenderForHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All</option>
+                        {uniqueTenderFor.map(tf => (
+                          <option key={tf} value={tf}>
+                            {tf}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "itemCategory" && (
+                    <div 
+                      className="column-item-category-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="item-category-filter-select"
+                        value={itemCategoryHeaderFilter}
+                        onChange={(e) => {
+                          setItemCategoryHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All</option>
+                        {uniqueItemCategories.map(ic => (
+                          <option key={ic} value={ic}>
+                            {ic}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "typeOfTender" && (
+                    <div 
+                      className="column-type-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="type-filter-select"
+                        value={typeHeaderFilter}
+                        onChange={(e) => {
+                          setTypeHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All</option>
+                        {uniqueTypes.map(t => (
+                          <option key={t} value={t}>
+                            {t}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "tenderPrepareBy" && (
+                    <div 
+                      className="column-prepare-by-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="prepare-by-filter-select"
+                        value={prepareByHeaderFilter}
+                        onChange={(e) => {
+                          setPrepareByHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All</option>
+                        <option value="BLANK">(Blank)</option>
+                        {uniquePrepareBy.map(p => (
+                          <option key={p} value={p}>
+                            {p}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "reverseAuctionApplicable" && (
+                    <div 
+                      className="column-ra-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="ra-filter-select"
+                        value={raHeaderFilter}
+                        onChange={(e) => {
+                          setRaHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All</option>
+                        <option value="YES">YES</option>
+                        <option value="NO">NO</option>
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "participated" && (
+                    <div 
+                      className="column-participated-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <select
+                        className="participated-filter-select"
+                        value={participatedHeaderFilter}
+                        onChange={(e) => {
+                          setParticipatedHeaderFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All</option>
+                        <option value="YES">YES</option>
+                        <option value="NO">NO</option>
+                      </select>
+                    </div>
+                  )}
+                  {col.accessor === "rawMaterials" && setAluminiumMin && setAluminiumMax && setCopperMin && setCopperMax && (
+                    <div 
+                      className="column-raw-materials-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <div className="filter-row">
+                        <span className="filter-row-label">Al:</span>
+                        <input
+                          type="number"
+                          placeholder="Min"
+                          className="col-price-filter-input"
+                          value={aluminiumMin || ""}
+                          onChange={(e) => setAluminiumMin(e.target.value)}
+                          title="Aluminium Min"
+                        />
+                        <span className="filter-row-dash">-</span>
+                        <input
+                          type="number"
+                          placeholder="Max"
+                          className="col-price-filter-input"
+                          value={aluminiumMax || ""}
+                          onChange={(e) => setAluminiumMax(e.target.value)}
+                          title="Aluminium Max"
+                        />
+                      </div>
+                      <div className="filter-row" style={{ marginTop: "4px" }}>
+                        <span className="filter-row-label">Cu:</span>
+                        <input
+                          type="number"
+                          placeholder="Min"
+                          className="col-price-filter-input"
+                          value={copperMin || ""}
+                          onChange={(e) => setCopperMin(e.target.value)}
+                          title="Copper Min"
+                        />
+                        <span className="filter-row-dash">-</span>
+                        <input
+                          type="number"
+                          placeholder="Max"
+                          className="col-price-filter-input"
+                          value={copperMax || ""}
+                          onChange={(e) => setCopperMax(e.target.value)}
+                          title="Copper Max"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {col.accessor === "remarks" && (
+                    <div 
+                      className="column-remarks-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      style={{ marginTop: "4px" }}
+                    >
+                      <input
+                        type="text"
+                        className="remarks-search-input"
+                        placeholder="Search remarks..."
+                        value={remarksTextFilter}
+                        onChange={(e) => {
+                          setRemarksTextFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      />
+                      <select
+                        className="remarks-filter-select"
+                        style={{ marginTop: "4px", width: "100%" }}
+                        value={remarksDropdownFilter}
+                        onChange={(e) => {
+                          setRemarksDropdownFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All Remarks</option>
+                        {uniqueRemarks.map(rem => (
+                          <option key={rem} value={rem}>
+                            {rem}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                   <div
                     className="column-resizer"
                     onMouseDown={(e) => handleResizeStart(e, col.accessor, columnWidths[col.accessor])}
@@ -521,6 +1326,51 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
                             <span className="no-rates-placeholder">-</span>
                           );
                           cellClass = "col-raw-materials";
+                        } else if (col.accessor === "files") {
+                          cellContent = (
+                            <FilesCell 
+                              docketNo={record.docketNo} 
+                              onOpenModal={handleOpenAttachmentModal} 
+                            />
+                          );
+                          cellClass = "col-center";
+                        } else if (col.accessor === "boqChart") {
+                          cellContent = (
+                            <BOQChartCell 
+                              docketNo={record.docketNo} 
+                            />
+                          );
+                          cellClass = "col-center";
+                        } else if (col.accessor === "proposedErpItemName" || col.accessor === "proposedQty") {
+                          const text = (record[col.accessor as keyof EpcTenderRecord] as string) || "";
+                          cellContent = text ? (
+                            <div className="proposed-items-cell-content">
+                              {text}
+                            </div>
+                          ) : (
+                            <span>-</span>
+                          );
+                          cellClass = "col-left text-pre-line";
+                        } else if (col.accessor === "competitors") {
+                          const text = (record[col.accessor as keyof EpcTenderRecord] as string) || "";
+                          cellContent = text ? (
+                            <div className="competitors-scroll-cell">
+                              {text}
+                            </div>
+                          ) : (
+                            <span>-</span>
+                          );
+                          cellClass = "col-left";
+                        } else if (col.accessor === "remarks") {
+                          const text = (record[col.accessor as keyof EpcTenderRecord] as string) || "";
+                          cellContent = text ? (
+                            <div className="remarks-scroll-cell">
+                              {text}
+                            </div>
+                          ) : (
+                            <span>-</span>
+                          );
+                          cellClass = "col-left";
                         } else {
                           cellVal = record[col.accessor as keyof EpcTenderRecord];
                           
@@ -567,11 +1417,13 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
                             );
                             cellClass = "col-center";
                           } else if (col.type === "status") {
-                            const statusVal = cellVal as CurrentStatus;
-                            cellContent = (
+                            const statusVal = (cellVal as string) || "";
+                            cellContent = statusVal ? (
                               <span className={`status-badge ${getStatusClass(statusVal)}`}>
-                                {getLoiLabel(statusVal)}
+                                {statusVal}
                               </span>
+                            ) : (
+                              <span>-</span>
                             );
                             cellClass = "col-center";
                           } else if (col.type === "decision") {
@@ -583,9 +1435,19 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
                             );
                             cellClass = "col-center";
                           } else {
-                            cellContent = cellVal !== null && cellVal !== undefined ? String(cellVal) : "-";
-                            if (col.accessor === "docketNo") {
-                              cellClass = "col-docket";
+                            if (col.accessor === "bgStatus") {
+                              const val = cellVal as string || "";
+                              cellContent = val ? (
+                                <span className={`bg-status-badge ${val.toLowerCase()}`}>
+                                  {val}
+                                </span>
+                              ) : "-";
+                              cellClass = "col-center";
+                            } else {
+                              cellContent = cellVal !== null && cellVal !== undefined ? String(cellVal) : "-";
+                              if (col.accessor === "docketNo") {
+                                cellClass = "col-docket";
+                              }
                             }
                           }
                         }
@@ -799,6 +1661,12 @@ export const TenderTable: React.FC<TenderTableProps> = ({ records }) => {
           </button>
         </div>
       </div>
+      
+      <AttachmentModal 
+        isOpen={isAttachmentModalOpen} 
+        onClose={() => setIsAttachmentModalOpen(false)} 
+        docketNo={selectedDocketNo} 
+      />
     </div>
   );
 };

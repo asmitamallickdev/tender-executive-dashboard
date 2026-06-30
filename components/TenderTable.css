@@ -33,8 +33,7 @@
 .tender-table-container {
   display: flex;
   flex-direction: column;
-  height: 55vh; /* Exactly 55% of viewport height */
-  min-height: 400px;
+  flex: 1;
   background-color: var(--color-bg-white);
   border: 1px solid var(--color-border);
   border-radius: 8px;
@@ -716,18 +715,16 @@
   font-weight: 500;
 }
 
-/* Header Price Filters styling */
-.column-price-filters {
+/* Column Specific Price Basis Filter */
+.column-price-basis-filter {
   display: flex;
   align-items: center;
-  gap: 4px;
   margin-top: 6px;
   width: 100%;
 }
 
-.price-filter-select {
-  flex: 1;
-  min-width: 0;
+.price-basis-filter-select {
+  width: 100%;
   padding: 4px 6px;
   background-color: var(--color-bg-white);
   border: 1px solid var(--color-border);
@@ -739,8 +736,338 @@
   outline: none;
   cursor: pointer;
   height: 24px;
+  transition: border-color 0.2s;
 }
 
-.price-filter-select:focus {
+.price-basis-filter-select:focus {
   border-color: var(--color-accent);
+}
+
+/* Column Specific Status Filter */
+.column-status-filter {
+  display: flex;
+  align-items: center;
+  margin-top: 6px;
+  width: 100%;
+}
+
+.status-filter-select {
+  width: 100%;
+  padding: 4px 6px;
+  background-color: var(--color-bg-white);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-primary);
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 500;
+  outline: none;
+  cursor: pointer;
+  height: 24px;
+  transition: border-color 0.2s;
+}
+
+.status-filter-select:focus {
+  border-color: var(--color-accent);
+}
+
+/* Column Specific Decision Filter */
+.column-decision-filter {
+  display: flex;
+  align-items: center;
+  margin-top: 6px;
+  width: 100%;
+}
+
+.decision-filter-select {
+  width: 100%;
+  padding: 4px 6px;
+  background-color: var(--color-bg-white);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-primary);
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 500;
+  outline: none;
+  cursor: pointer;
+  height: 24px;
+  transition: border-color 0.2s;
+}
+
+.decision-filter-select:focus {
+  border-color: var(--color-accent);
+}
+
+/* Column Specific Dropdown Filters */
+.column-emd-payment-filter,
+.column-tender-for-filter,
+.column-type-filter,
+.column-prepare-by-filter,
+.column-ra-filter,
+.column-participated-filter,
+.column-status-category-filter,
+.column-item-category-filter {
+  display: flex;
+  align-items: center;
+  margin-top: 6px;
+  width: 100%;
+}
+
+.emd-payment-filter-select,
+.tender-for-filter-select,
+.type-filter-select,
+.prepare-by-filter-select,
+.ra-filter-select,
+.participated-filter-select,
+.status-category-filter-select,
+.item-category-filter-select,
+.remarks-filter-select,
+.bg-status-filter-select {
+  width: 100%;
+  padding: 4px 6px;
+  background-color: var(--color-bg-white);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-primary);
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 500;
+  outline: none;
+  cursor: pointer;
+  height: 24px;
+  transition: border-color 0.2s;
+}
+
+.emd-payment-filter-select:focus,
+.tender-for-filter-select:focus,
+.type-filter-select:focus,
+.prepare-by-filter-select:focus,
+.ra-filter-select:focus,
+.participated-filter-select:focus,
+.status-category-filter-select:focus,
+.item-category-filter-select:focus,
+.remarks-filter-select:focus,
+.bg-status-filter-select:focus {
+  border-color: var(--color-accent);
+}
+
+.column-remarks-filter {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+  width: 100%;
+  gap: 2px;
+}
+
+.remarks-search-input {
+  width: 100%;
+  padding: 4px 6px;
+  background-color: var(--color-bg-white);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-primary);
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 500;
+  outline: none;
+  height: 24px;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.remarks-search-input:focus {
+  border-color: var(--color-accent);
+}
+
+/* Column Specific Raw Materials Filter */
+.column-raw-materials-filter {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+  width: 100%;
+  gap: 4px;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+}
+
+.filter-row-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.7);
+  width: 20px;
+  text-align: right;
+}
+
+.col-price-filter-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  background-color: var(--color-bg-white);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-primary);
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 500;
+  outline: none;
+  transition: border-color 0.2s;
+  height: 20px;
+}
+
+.col-price-filter-input:focus {
+  border-color: var(--color-accent);
+}
+
+.filter-row-dash {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 600;
+}
+
+.table-attachment-btn {
+  background-color: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #2563eb;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.table-attachment-btn:hover {
+  background-color: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+}
+
+.cell-loading-shimmer {
+  font-size: 11px;
+  color: #94a3b8;
+  animation: cellPulse 1.5s infinite;
+}
+
+@keyframes cellPulse {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+
+.table-boq-btn {
+  background-color: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #16a34a;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.table-boq-btn:hover {
+  background-color: #16a34a;
+  color: #ffffff;
+  border-color: #16a34a;
+}
+
+.text-pre-line {
+  white-space: pre-wrap;
+  line-height: 1.4;
+  font-size: 11px;
+}
+
+.proposed-items-cell-content {
+  text-align: left;
+  padding: 4px 0;
+  white-space: pre-wrap;
+}
+
+.remarks-scroll-cell {
+  max-height: 60px;
+  overflow-y: auto;
+  white-space: normal;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.4;
+  padding-right: 4px;
+  text-align: left;
+}
+
+.remarks-scroll-cell::-webkit-scrollbar {
+  width: 4px;
+}
+.remarks-scroll-cell::-webkit-scrollbar-track {
+  background: transparent;
+}
+.remarks-scroll-cell::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 2px;
+}
+.remarks-scroll-cell::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.competitors-scroll-cell {
+  max-height: 60px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.4;
+  padding-right: 4px;
+  text-align: left;
+}
+
+.competitors-scroll-cell::-webkit-scrollbar {
+  width: 4px;
+}
+.competitors-scroll-cell::-webkit-scrollbar-track {
+  background: transparent;
+}
+.competitors-scroll-cell::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 2px;
+}
+.competitors-scroll-cell::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.bg-status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  border: 1px solid transparent;
+}
+.bg-status-badge.running {
+  background-color: var(--status-won-bg);
+  color: var(--status-won-text);
+  border-color: var(--status-won-border);
+}
+.bg-status-badge.closed {
+  background-color: var(--status-lost-bg);
+  color: var(--status-lost-text);
+  border-color: var(--status-lost-border);
+}
+
+.column-bg-status-filter {
+  margin-top: 6px;
+  width: 100%;
 }

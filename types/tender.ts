@@ -94,7 +94,7 @@ export interface EpcTenderRecord {
   tenderPrepareBy: string;
 
   /** Column: "Current Status" - E.g., Submitted, Won, Lost, Under Evaluation */
-  currentStatus: CurrentStatus;
+  currentStatus: string;
 
   /** Column: "Tender Submitted Date" - Date of submission (Primary filter field) */
   tenderSubmittedDate: Date | null;
@@ -150,4 +150,13 @@ export interface EpcTenderRecord {
   pvcTypeSt2Price?: number | null;
   galvanisedSteelFlatStripPrice?: number | null;
   fillerPrice?: number | null;
+  proposedErpItemName?: string;
+  proposedQty?: string;
+  statusCategory?: string;
+  itemCategory?: string | null;
+  competitors?: string | null;
+  fileCount?: number;
+  hasBoqChart?: boolean;
+  bgStatus?: string | null;
 }
+

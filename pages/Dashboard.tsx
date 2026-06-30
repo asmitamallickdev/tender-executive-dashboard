@@ -5,7 +5,6 @@ import { AlertPanel } from "../components/AlertPanel";
 
 import { useTenderData } from "../hooks/useTenderData";
 import { TenderCalculations } from "../services/tenderCalculations";
-import { CurrentStatus } from "../types/tender";
 
 import "./Dashboard.css";
 
@@ -21,14 +20,7 @@ export const Dashboard: React.FC = () => {
 
   // 4. Sidebar Filter States
   const [clientSearch, setClientSearch] = useState<string>("");
-  const [selectedStatuses, setSelectedStatuses] = useState<CurrentStatus[]>([
-    CurrentStatus.WON,
-    CurrentStatus.LOST,
-    CurrentStatus.UNDER_EVALUATION,
-    CurrentStatus.RA_PENDING,
-    CurrentStatus.SUBMITTED,
-    CurrentStatus.IN_PREPARATION
-  ]);
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
   const [selectedEngineer, setSelectedEngineer] = useState<string>("All");
   const [selectedDecision, setSelectedDecision] = useState<string>("All");
   const [valueMin, setValueMin] = useState<string>("");
@@ -55,6 +47,12 @@ export const Dashboard: React.FC = () => {
     return Array.from(new Set(list)).sort();
   }, [primaryDataset]);
 
+  // Unique Statuses List (for Sidebar Checkboxes)
+  const uniqueStatuses = useMemo(() => {
+    const list = primaryDataset.map(r => r.currentStatus || "");
+    return Array.from(new Set(list)).sort();
+  }, [primaryDataset]);
+
   // 8. Active Sidebar-Filtered Dataset
   const activeDataset = useMemo(() => {
     return primaryDataset.filter(record => {
@@ -66,10 +64,8 @@ export const Dashboard: React.FC = () => {
 
       // Status Filter
       if (selectedStatuses.length > 0) {
-        const match = selectedStatuses.includes(record.currentStatus);
+        const match = selectedStatuses.includes(record.currentStatus || "");
         if (!match) return false;
-      } else {
-        return false; // If no status selected, display nothing
       }
 
       // Engineer Filter
@@ -153,6 +149,7 @@ export const Dashboard: React.FC = () => {
           setClientSearch={setClientSearch}
           selectedStatuses={selectedStatuses}
           setSelectedStatuses={setSelectedStatuses}
+          uniqueStatuses={uniqueStatuses}
           selectedEngineer={selectedEngineer}
           setSelectedEngineer={setSelectedEngineer}
           engineersList={engineersList}

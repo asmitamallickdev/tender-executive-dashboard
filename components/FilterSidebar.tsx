@@ -1,5 +1,5 @@
 import React from "react";
-import { CurrentStatus, ManagementDecision } from "../types/tender";
+import { ManagementDecision } from "../types/tender";
 import "./FilterSidebar.css";
 
 interface FilterSidebarProps {
@@ -8,8 +8,9 @@ interface FilterSidebarProps {
   setClientSearch: (val: string) => void;
 
   // Status Filter
-  selectedStatuses: CurrentStatus[];
-  setSelectedStatuses: (statuses: CurrentStatus[]) => void;
+  selectedStatuses: string[];
+  setSelectedStatuses: (statuses: string[]) => void;
+  uniqueStatuses: string[];
 
   // Engineer Filter
   selectedEngineer: string;
@@ -49,6 +50,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
   setClientSearch,
   selectedStatuses,
   setSelectedStatuses,
+  uniqueStatuses,
   selectedEngineer,
   setSelectedEngineer,
   engineersList,
@@ -70,18 +72,8 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
   setPriceBasisFilter,
   onRefresh
 }) => {
-  // Checkbox status options
-  const statusOptions = [
-    { label: "Won", value: CurrentStatus.WON },
-    { label: "Lost", value: CurrentStatus.LOST },
-    { label: "Under Eval", value: CurrentStatus.UNDER_EVALUATION },
-    { label: "RA Pending", value: CurrentStatus.RA_PENDING },
-    { label: "Submitted", value: CurrentStatus.SUBMITTED },
-    { label: "In Prep", value: CurrentStatus.IN_PREPARATION }
-  ];
-
   // Handle status checkbox toggles
-  const handleStatusToggle = (status: CurrentStatus) => {
+  const handleStatusToggle = (status: string) => {
     if (selectedStatuses.includes(status)) {
       setSelectedStatuses(selectedStatuses.filter(s => s !== status));
     } else {
@@ -110,15 +102,15 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
         <div className="filter-section">
           <label className="filter-label">Status</label>
           <div className="checkbox-group">
-            {statusOptions.map(opt => (
-              <label key={opt.value} className="checkbox-label">
+            {uniqueStatuses.map(status => (
+              <label key={status} className="checkbox-label">
                 <input
                   type="checkbox"
                   className="checkbox-input"
-                  checked={selectedStatuses.includes(opt.value)}
-                  onChange={() => handleStatusToggle(opt.value)}
+                  checked={selectedStatuses.includes(status)}
+                  onChange={() => handleStatusToggle(status)}
                 />
-                <span>{opt.label}</span>
+                <span>{status || "(Blank)"}</span>
               </label>
             ))}
           </div>
