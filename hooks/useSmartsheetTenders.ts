@@ -1,10 +1,9 @@
 // hooks/useSmartsheetTenders.ts
-// Mirrors the useTenderData hook pattern but fetches from /api/smartsheet-tenders.
-import { useState, useEffect, useCallback } from "react";
+// Fetches from /api/smartsheet-tenders with 30s polling.
+// The server uses SWR (Stale-While-Revalidate) caching,
+// so most requests return instantly with cached data.
+import { useState, useEffect, useCallback, useRef } from "react";
 import { SmartsheetTender } from "../types/smartsheetTender";
-
-const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 minutes
-let cache: { records: SmartsheetTender[]; timestamp: number } | null = null;
 
 interface UseSmartsheetTendersResult {
   data: SmartsheetTender[];
@@ -17,21 +16,18 @@ export const useSmartsheetTenders = (): UseSmartsheetTendersResult => {
   const [data, setData] = useState<SmartsheetTender[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<Error | null>(null);
+  const hasData = useRef(false);
 
   const fetchData = useCallback(async (forceRefresh = false) => {
-    const now = Date.now();
-    if (!forceRefresh && cache && now - cache.timestamp < CACHE_DURATION_MS) {
-      setData(cache.records);
-      setError(null);
-      setLoading(false);
-      return;
+    // Only show loading on initial fetch or manual refresh, not background polls
+    if (forceRefresh || !hasData.current) {
+      setLoading(true);
     }
-
-    setLoading(true);
     setError(null);
 
     try {
-      const response = await fetch("/api/smartsheet-tenders");
+      const query = forceRefresh ? "?fresh=true" : "";
+      const response = await fetch(`/api/smartsheet-tenders${query}`);
       const json = await response.json();
 
       if (!response.ok || !json.success) {
@@ -41,7 +37,7 @@ export const useSmartsheetTenders = (): UseSmartsheetTendersResult => {
       }
 
       const records: SmartsheetTender[] = json.data || [];
-      cache = { records, timestamp: now };
+      hasData.current = true;
       setData(records);
     } catch (err) {
       setError(err instanceof Error ? err : new Error("Unexpected error fetching Smartsheet data"));
@@ -50,8 +46,11 @@ export const useSmartsheetTenders = (): UseSmartsheetTendersResult => {
     }
   }, []);
 
+  // Initial fetch + polling every 30 seconds
   useEffect(() => {
     fetchData();
+    const interval = setInterval(() => fetchData(), 30_000);
+    return () => clearInterval(interval);
   }, [fetchData]);
 
   const refresh = useCallback(async () => {

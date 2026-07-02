@@ -46,20 +46,7 @@ async function getCostingDetails(attachmentUrl, docketNo) {
   const localPath = path.join(CACHE_DIR, `${hash}.xlsx`);
 
   let fileExists = fs.existsSync(localPath);
-  
-  if (fileExists) {
-    try {
-      const stats = fs.statSync(localPath);
-      const TTL_MS = 2 * 60 * 1000; // 2 minutes
-      if (Date.now() - stats.mtimeMs > TTL_MS) {
-        console.log(`[Cache] Cache expired for docket "${docketNo}" (older than 2 mins). Re-downloading...`);
-        fileExists = false;
-      }
-    } catch (statErr) {
-      console.warn(`[Cache] Error checking stats for cached file: ${statErr.message}`);
-    }
-  }
-  
+
   if (!fileExists) {
     try {
       console.log(`[Cache] Downloading costing Excel for docket "${docketNo}"...`);
@@ -290,6 +277,7 @@ async function getCostingDetails(attachmentUrl, docketNo) {
 
     } catch (err) {
       console.warn(`[Cache] Error parsing Excel for docket "${docketNo}": ${err.message}`);
+      try { fs.unlinkSync(localPath); } catch (_) {}
       return null;
     }
   }
@@ -1137,7 +1125,7 @@ async function getAccessToken(clientEmail, privateKey) {
   const header = { alg: "RS256", typ: "JWT" };
   const claimSet = {
     iss: clientEmail,
-    scope: "https://www.googleapis.com/auth/spreadsheets.readonly",
+    scope: "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly",
     aud: "https://oauth2.googleapis.com/token",
     exp: now + 3600,
     iat: now

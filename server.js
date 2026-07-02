@@ -142,30 +142,49 @@ app.get("/api/tenders", handler);
 registerAttachmentRoutes(app);
 registerTenderRoutes(app);
 
-// ── Smartsheet Tender Dashboard API ─────────────────────────────────────────
-// GET /api/smartsheet-tenders
-// Fetches and maps rows from the configured Smartsheet sheet.
-// Makes exactly ONE Smartsheet API call per request.
-app.get("/api/smartsheet-tenders", async (req, res) => {
-  const token = process.env.SMARTSHEET_API_TOKEN;
-  const sheetId = process.env.SMARTSHEET_SHEET_ID;
+// ── SWR Cache for Smartsheet Tender Dashboard ─────────────────────────────
+const smartsheetCache = { data: null, updatedAt: 0 };
+let smartsheetFetchPromise = null;
+let enrichmentPromise = null;
+const SMARTSHEET_CACHE_PATH = path.resolve(process.cwd(), "data", "smartsheet_cache.json");
 
-  if (!token || token.trim() === "") {
-    return res.status(500).json({
-      success: false,
-      error: "Server is not configured. SMARTSHEET_API_TOKEN is missing.",
-      code: "MISSING_TOKEN",
-    });
+function loadSmartsheetCacheFromDisk() {
+  try {
+    if (fs.existsSync(SMARTSHEET_CACHE_PATH)) {
+      const cached = JSON.parse(fs.readFileSync(SMARTSHEET_CACHE_PATH, "utf-8"));
+      if (cached && cached.data && Array.isArray(cached.data)) {
+        smartsheetCache.data = cached.data;
+        smartsheetCache.updatedAt = cached.updatedAt || 0;
+        console.log(`[SmartsheetCache] Loaded ${cached.data.length} rows from disk`);
+        return true;
+      }
+    }
+  } catch (err) {
+    console.warn("[SmartsheetCache] Failed to load disk cache:", err.message);
   }
+  return false;
+}
 
-  if (!sheetId || sheetId.trim() === "") {
-    return res.status(500).json({
-      success: false,
-      error: "Server is not configured. SMARTSHEET_SHEET_ID is missing.",
-      code: "MISSING_SHEET_ID",
-    });
+async function saveSmartsheetCacheToDisk() {
+  try {
+    if (!fs.existsSync(path.dirname(SMARTSHEET_CACHE_PATH))) {
+      fs.mkdirSync(path.dirname(SMARTSHEET_CACHE_PATH), { recursive: true });
+    }
+    await fs.promises.writeFile(SMARTSHEET_CACHE_PATH, JSON.stringify({
+      data: smartsheetCache.data,
+      updatedAt: smartsheetCache.updatedAt
+    }), "utf-8");
+  } catch (err) {
+    console.warn("[SmartsheetCache] Failed to save disk cache:", err.message);
   }
+}
 
+loadSmartsheetCacheFromDisk();
+
+/**
+ * Fetches fresh Smartsheet + costing data. Throws on failure.
+ */
+async function fetchSmartsheetData(token, sheetId) {
   try {
     const url = `https://api.smartsheet.com/2.0/sheets/${sheetId.trim()}`;
     let response;
@@ -180,11 +199,7 @@ app.get("/api/smartsheet-tenders", async (req, res) => {
     } catch (networkErr) {
       const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
       console.error(`[SmartsheetAPI] Network error: ${msg}`);
-      return res.status(502).json({
-        success: false,
-        error: `Cannot reach Smartsheet API. Check your network connection. (${msg})`,
-        code: "NETWORK_ERROR",
-      });
+      throw new Error(`Cannot reach Smartsheet API. Check your network connection. (${msg})`);
     }
 
     if (!response.ok) {
@@ -193,38 +208,18 @@ app.get("/api/smartsheet-tenders", async (req, res) => {
       console.error(`[SmartsheetAPI] HTTP ${response.status}: ${body}`);
 
       if (response.status === 401) {
-        return res.status(401).json({
-          success: false,
-          error: "Invalid or expired Smartsheet API token. Verify SMARTSHEET_API_TOKEN in .env.",
-          code: "UNAUTHORIZED",
-        });
+        throw new Error("Invalid or expired Smartsheet API token. Verify SMARTSHEET_API_TOKEN in .env.");
       }
       if (response.status === 403) {
-        return res.status(403).json({
-          success: false,
-          error: `Smartsheet token does not have access to sheet ${sheetId}. Grant read permissions.`,
-          code: "FORBIDDEN",
-        });
+        throw new Error(`Smartsheet token does not have access to sheet ${sheetId}. Grant read permissions.`);
       }
       if (response.status === 404) {
-        return res.status(404).json({
-          success: false,
-          error: `Sheet ID "${sheetId}" not found in Smartsheet. Verify SMARTSHEET_SHEET_ID.`,
-          code: "NOT_FOUND",
-        });
+        throw new Error(`Sheet ID "${sheetId}" not found in Smartsheet. Verify SMARTSHEET_SHEET_ID.`);
       }
       if (response.status === 429) {
-        return res.status(429).json({
-          success: false,
-          error: "Smartsheet API rate limit exceeded. Please wait a moment and try again.",
-          code: "RATE_LIMITED",
-        });
+        throw new Error("Smartsheet API rate limit exceeded. Please wait a moment and try again.");
       }
-      return res.status(500).json({
-        success: false,
-        error: `Unexpected Smartsheet API error (${response.status}).`,
-        code: "UNKNOWN",
-      });
+      throw new Error(`Unexpected Smartsheet API error (${response.status}).`);
     }
 
     const sheetData = await response.json();
@@ -344,72 +339,237 @@ app.get("/api/smartsheet-tenders", async (req, res) => {
       }
     }
 
-    // Enrich each Smartsheet row with costing details (Tender Qty, Raw Materials)
-    const enrichedData = [];
+    // Fetch Drive access token once for all costing Excel downloads
+    let driveAccessToken = null;
+    try {
+      const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
+      const key = process.env.GOOGLE_PRIVATE_KEY;
+      if (email && key) {
+        let cleanKey = key.trim().replace(/^["']|["']$/g, "").replace(/\\n/g, "\n");
+        let cleanEmail = email.trim().replace(/^["']|["']$/g, "");
+        driveAccessToken = await getAccessToken(cleanEmail, cleanKey);
+      }
+    } catch (tokErr) {
+      console.warn(`[SmartsheetAPI] Failed to get Drive access token, skipping all Drive costing downloads: ${tokErr.message}`);
+    }
+
+    // Probe Drive access with the first available attachment URL
+    if (driveAccessToken) {
+      const firstDriveEntry = [...costingMap.entries()].find(([_, v]) => v.url && getGoogleDriveFileId(v.url));
+      if (firstDriveEntry) {
+        const fileId = getGoogleDriveFileId(firstDriveEntry[1].url);
+        try {
+          const probeResponse = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+            headers: { "Authorization": `Bearer ${driveAccessToken}` }
+          });
+          if (!probeResponse.ok) {
+            console.warn(`[SmartsheetAPI] Drive access probe returned ${probeResponse.status}, skipping all Drive costing downloads`);
+            driveAccessToken = null;
+          }
+        } catch (probeErr) {
+          console.warn(`[SmartsheetAPI] Drive access probe failed, skipping all Drive costing downloads: ${probeErr.message}`);
+          driveAccessToken = null;
+        }
+      }
+    }
+
+    // Build basic data immediately (NO Excel downloads — they happen in background)
+    const basicData = [];
     for (const row of data) {
       const numericDocket = extractNumericDocket(row.docketNumber);
       let attachmentUrl = null;
-      let proposedQty = null;
-      let priceBasis = null;
       let itemCategory = null;
-
-      let aluminiumPrice = null;
-      let aluminiumAlloyPrice = null;
-      let copperTapePrice = null;
-      let extrudedSemiconductivePrice = null;
-      let htXlpePrice = null;
-      let pvcTypeSt2Price = null;
-      let galvanisedSteelFlatStripPrice = null;
-      let fillerPrice = null;
 
       if (numericDocket && costingMap.has(numericDocket)) {
         const match = costingMap.get(numericDocket);
         attachmentUrl = match.url;
         itemCategory = match.itemCategory;
-
-        try {
-          const costingDetails = await getCostingDetails(attachmentUrl, numericDocket);
-          if (costingDetails) {
-            proposedQty = costingDetails.proposedQty;
-            priceBasis = costingDetails.priceBasis;
-            if (costingDetails.prices) {
-              aluminiumPrice = costingDetails.prices.aluminium;
-              aluminiumAlloyPrice = costingDetails.prices.aluminiumAlloy;
-              copperTapePrice = costingDetails.prices.copperTape;
-              extrudedSemiconductivePrice = costingDetails.prices.extrudedSemiconductive;
-              htXlpePrice = costingDetails.prices.htXlpe;
-              pvcTypeSt2Price = costingDetails.prices.pvcTypeSt2;
-              galvanisedSteelFlatStripPrice = costingDetails.prices.galvanisedSteelFlatStrip;
-              fillerPrice = costingDetails.prices.filler;
-            }
-          }
-        } catch (err) {
-          console.warn(`[SmartsheetAPI] Failed to parse costing Excel for docket "${numericDocket}": ${err.message}`);
-        }
       }
 
-      enrichedData.push({
+      basicData.push({
         ...row,
         attachmentUrl: getGoogleDriveDownloadUrl(attachmentUrl),
-        proposedQty,
-        priceBasis,
+        proposedQty: null,
+        priceBasis: null,
         itemCategory,
-        aluminiumPrice,
-        aluminiumAlloyPrice,
-        copperTapePrice,
-        extrudedSemiconductivePrice,
-        htXlpePrice,
-        pvcTypeSt2Price,
-        galvanisedSteelFlatStripPrice,
-        fillerPrice
+        aluminiumPrice: null,
+        aluminiumAlloyPrice: null,
+        copperTapePrice: null,
+        extrudedSemiconductivePrice: null,
+        htXlpePrice: null,
+        pvcTypeSt2Price: null,
+        galvanisedSteelFlatStripPrice: null,
+        fillerPrice: null
       });
     }
 
-    console.log(`[SmartsheetAPI] ✓ Fetched and enriched ${enrichedData.length} rows.`);
-    return res.status(200).json({ success: true, data: enrichedData });
+    console.log(`[SmartsheetAPI] ✓ Fetched ${data.length} rows. Enriching in background...`);
+
+    // Fire-and-forget background enrichment
+    enrichSmartsheetCacheInBackground(data, costingMap, driveAccessToken).catch(err =>
+      console.error("[SmartsheetCache] Background enrichment error:", err.message)
+    );
+
+    return basicData;
   } catch (err) {
     console.error("[SmartsheetAPI] Unhandled error:", err);
+    throw err;
+  }
+}
+
+/**
+ * Background enrichment: downloads costing Excel files and updates the cache.
+ * Uses a promise guard to prevent concurrent runs.
+ */
+async function enrichSmartsheetCacheInBackground(data, costingMap, driveAccessToken) {
+  if (enrichmentPromise) return enrichmentPromise;
+  enrichmentPromise = enrichSmartsheetData(data, costingMap, driveAccessToken);
+  try {
+    return await enrichmentPromise;
+  } finally {
+    enrichmentPromise = null;
+  }
+}
+
+async function enrichSmartsheetData(data, costingMap, driveAccessToken) {
+  console.log(`[SmartsheetCache] Starting background enrichment for ${data.length} rows...`);
+  const enrichedData = [];
+
+  for (const row of data) {
+    const numericDocket = extractNumericDocket(row.docketNumber);
+    let attachmentUrl = null;
+    let proposedQty = null;
+    let priceBasis = null;
+    let itemCategory = null;
+    let aluminiumPrice = null;
+    let aluminiumAlloyPrice = null;
+    let copperTapePrice = null;
+    let extrudedSemiconductivePrice = null;
+    let htXlpePrice = null;
+    let pvcTypeSt2Price = null;
+    let galvanisedSteelFlatStripPrice = null;
+    let fillerPrice = null;
+
+    if (numericDocket && costingMap.has(numericDocket)) {
+      const match = costingMap.get(numericDocket);
+      attachmentUrl = match.url;
+      itemCategory = match.itemCategory;
+
+      try {
+        const costingDetails = await getCostingDetails(attachmentUrl, numericDocket, driveAccessToken);
+        if (costingDetails) {
+          proposedQty = costingDetails.proposedQty;
+          priceBasis = costingDetails.priceBasis;
+          if (costingDetails.prices) {
+            aluminiumPrice = costingDetails.prices.aluminium;
+            aluminiumAlloyPrice = costingDetails.prices.aluminiumAlloy;
+            copperTapePrice = costingDetails.prices.copperTape;
+            extrudedSemiconductivePrice = costingDetails.prices.extrudedSemiconductive;
+            htXlpePrice = costingDetails.prices.htXlpe;
+            pvcTypeSt2Price = costingDetails.prices.pvcTypeSt2;
+            galvanisedSteelFlatStripPrice = costingDetails.prices.galvanisedSteelFlatStrip;
+            fillerPrice = costingDetails.prices.filler;
+          }
+        }
+      } catch (err) {
+        console.warn(`[SmartsheetAPI] Failed to parse costing Excel for docket "${numericDocket}": ${err.message}`);
+      }
+    }
+
+    enrichedData.push({
+      ...row,
+      attachmentUrl: getGoogleDriveDownloadUrl(attachmentUrl),
+      proposedQty,
+      priceBasis,
+      itemCategory,
+      aluminiumPrice,
+      aluminiumAlloyPrice,
+      copperTapePrice,
+      extrudedSemiconductivePrice,
+      htXlpePrice,
+      pvcTypeSt2Price,
+      galvanisedSteelFlatStripPrice,
+      fillerPrice
+    });
+  }
+
+  smartsheetCache.data = enrichedData;
+  smartsheetCache.updatedAt = Date.now();
+  await saveSmartsheetCacheToDisk();
+  console.log(`[SmartsheetCache] ✓ Background enrichment complete: ${enrichedData.length} rows.`);
+}
+
+/**
+ * SWR wrapper: returns cached data or fetches fresh, deduplicates concurrent calls.
+ */
+async function refreshSmartsheetCache(token, sheetId, forceNew = false) {
+  if (smartsheetFetchPromise) {
+    if (forceNew) {
+      await smartsheetFetchPromise.catch(() => {});
+    } else {
+      return smartsheetFetchPromise;
+    }
+  }
+  smartsheetFetchPromise = fetchSmartsheetData(token, sheetId);
+  try {
+    const data = await smartsheetFetchPromise;
+    smartsheetCache.data = data;
+    smartsheetCache.updatedAt = Date.now();
+    saveSmartsheetCacheToDisk();
+    return data;
+  } finally {
+    smartsheetFetchPromise = null;
+  }
+}
+
+// ── Smartsheet Tender Dashboard API ─────────────────────────────────────────
+// GET /api/smartsheet-tenders
+// Uses SWR pattern: returns cached data immediately, refreshes in background.
+app.get("/api/smartsheet-tenders", async (req, res) => {
+  const token = process.env.SMARTSHEET_API_TOKEN;
+  const sheetId = process.env.SMARTSHEET_SHEET_ID;
+
+  if (!token || token.trim() === "") {
     return res.status(500).json({
+      success: false,
+      error: "Server is not configured. SMARTSHEET_API_TOKEN is missing.",
+      code: "MISSING_TOKEN",
+    });
+  }
+
+  if (!sheetId || sheetId.trim() === "") {
+    return res.status(500).json({
+      success: false,
+      error: "Server is not configured. SMARTSHEET_SHEET_ID is missing.",
+      code: "MISSING_SHEET_ID",
+    });
+  }
+
+  const forceFresh = req.query.fresh === "true";
+
+  // SWR: serve stale cache immediately, refresh in background
+  if (smartsheetCache.data && !forceFresh) {
+    res.json({ success: true, data: smartsheetCache.data });
+    if (!smartsheetFetchPromise) {
+      refreshSmartsheetCache(token.trim(), sheetId.trim()).catch(err =>
+        console.error("[SmartsheetCache] Background refresh:", err.message)
+      );
+    }
+    return;
+  }
+
+  // No cache or forced fresh — wait for fresh data
+  try {
+    const data = await refreshSmartsheetCache(token.trim(), sheetId.trim(), forceFresh);
+    res.status(200).json({ success: true, data });
+  } catch (err) {
+    // Fallback to stale cache if fetch fails
+    if (smartsheetCache.data) {
+      console.warn("[SmartsheetAPI] Fetch failed, serving stale cache:", err.message);
+      return res.json({ success: true, data: smartsheetCache.data });
+    }
+    console.error("[SmartsheetAPI] Unhandled error:", err);
+    res.status(500).json({
       success: false,
       error: err instanceof Error ? err.message : "An unexpected server error occurred.",
       code: "UNKNOWN",
@@ -436,7 +596,7 @@ if (!fs.existsSync(CACHE_DIR)) {
  * Downloads and parses an Excel costing sheet, extracting the Price Basis
  * and raw material rates. Uses a local filesystem cache (in /tmp for Vercel).
  */
-async function getCostingDetails(attachmentUrl, docketNo) {
+async function getCostingDetails(attachmentUrl, docketNo, driveAccessToken) {
   if (!attachmentUrl) return null;
   
   let downloadUrl = attachmentUrl;
@@ -444,43 +604,19 @@ async function getCostingDetails(attachmentUrl, docketNo) {
 
   const fileId = getGoogleDriveFileId(attachmentUrl);
   if (fileId) {
-    downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
-    
-    // Get access token dynamically
-    const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
-    const key = process.env.GOOGLE_PRIVATE_KEY;
-    if (email && key) {
-      try {
-        let cleanKey = key.trim().replace(/^["']|["']$/g, "").replace(/\\n/g, "\n");
-        let cleanEmail = email.trim().replace(/^["']|["']$/g, "");
-        const token = await getAccessToken(cleanEmail, cleanKey);
-        if (token) {
-          headers["Authorization"] = `Bearer ${token}`;
-        }
-      } catch (tokErr) {
-        console.warn(`[Cache] Failed to get Google access token for Drive download: ${tokErr.message}`);
-      }
+    if (!driveAccessToken) {
+      console.warn(`[Cache] No Drive access token available, skipping Drive download for docket "${docketNo}"`);
+      return null;
     }
+    downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+    headers["Authorization"] = `Bearer ${driveAccessToken}`;
   }
 
   const hash = crypto.createHash("md5").update(downloadUrl).digest("hex");
   const localPath = path.join(CACHE_DIR, `${hash}.xlsx`);
 
   let fileExists = fs.existsSync(localPath);
-  
-  if (fileExists) {
-    try {
-      const stats = fs.statSync(localPath);
-      const TTL_MS = 2 * 60 * 1000; // 2 minutes
-      if (Date.now() - stats.mtimeMs > TTL_MS) {
-        console.log(`[Cache] Cache expired for docket "${docketNo}" (older than 2 mins). Re-downloading...`);
-        fileExists = false;
-      }
-    } catch (statErr) {
-      console.warn(`[Cache] Error checking stats for cached file: ${statErr.message}`);
-    }
-  }
-  
+
   if (!fileExists) {
     try {
       console.log(`[Cache] Downloading costing Excel for docket "${docketNo}"...`);
@@ -711,6 +847,7 @@ async function getCostingDetails(attachmentUrl, docketNo) {
 
     } catch (err) {
       console.warn(`[Cache] Error parsing Excel for docket "${docketNo}": ${err.message}`);
+      try { fs.unlinkSync(localPath); } catch (_) {}
       return null;
     }
   }
@@ -1308,6 +1445,40 @@ export default async function handler(req, res) {
       }
     }
 
+    // Fetch Drive access token once for all costing Excel downloads
+    let driveAccessToken = null;
+    try {
+      const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
+      const key = process.env.GOOGLE_PRIVATE_KEY;
+      if (email && key) {
+        let cleanKey = key.trim().replace(/^["']|["']$/g, "").replace(/\\n/g, "\n");
+        let cleanEmail = email.trim().replace(/^["']|["']$/g, "");
+        driveAccessToken = await getAccessToken(cleanEmail, cleanKey);
+      }
+    } catch (tokErr) {
+      console.warn(`[Handler] Failed to get Drive access token, skipping all Drive costing downloads: ${tokErr.message}`);
+    }
+
+    // Probe Drive access with the first available attachment URL
+    if (driveAccessToken) {
+      const firstDriveTender = rawEnrichedRecords.find(t => t.attachmentUrl && getGoogleDriveFileId(t.attachmentUrl));
+      if (firstDriveTender) {
+        const fileId = getGoogleDriveFileId(firstDriveTender.attachmentUrl);
+        try {
+          const probeResponse = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+            headers: { "Authorization": `Bearer ${driveAccessToken}` }
+          });
+          if (!probeResponse.ok) {
+            console.warn(`[Handler] Drive access probe returned ${probeResponse.status}, skipping all Drive costing downloads`);
+            driveAccessToken = null;
+          }
+        } catch (probeErr) {
+          console.warn(`[Handler] Drive access probe failed, skipping all Drive costing downloads: ${probeErr.message}`);
+          driveAccessToken = null;
+        }
+      }
+    }
+
     // 5. Fetch and parse costing Excel details for matched records
     const enrichedRecords = await Promise.all(rawEnrichedRecords.map(async (tender) => {
       const cleanTenderNo = (tender.tenderNoNitNo || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -1389,7 +1560,7 @@ export default async function handler(req, res) {
       }
 
       if (tender.attachmentUrl) {
-        const details = await getCostingDetails(tender.attachmentUrl, tender.docketNo);
+        const details = await getCostingDetails(tender.attachmentUrl, tender.docketNo, driveAccessToken);
         if (details) {
           return {
             ...tender,
@@ -1502,7 +1673,7 @@ async function getAccessToken(clientEmail, privateKey) {
   const header = { alg: "RS256", typ: "JWT" };
   const claimSet = {
     iss: clientEmail,
-    scope: "https://www.googleapis.com/auth/spreadsheets.readonly",
+    scope: "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly",
     aud: "https://oauth2.googleapis.com/token",
     exp: now + 3600,
     iat: now
@@ -1666,4 +1837,21 @@ app.listen(PORT, () => {
   console.log(`🚀 SECURE BACKEND PROXY SERVER RUNNING ON PORT ${PORT}`);
   console.log(`   Endpoint: http://localhost:${PORT}/api/tenders`);
   console.log("=================================================");
+  
+  // Pre-warm Smartsheet cache so the first user request is instant
+  setTimeout(() => {
+    if (smartsheetCache.data) {
+      console.log("[SmartsheetCache] Skipping pre-warm (loaded from disk)");
+      return;
+    }
+    const token = process.env.SMARTSHEET_API_TOKEN;
+    const sheetId = process.env.SMARTSHEET_SHEET_ID;
+    if (token && token.trim() && sheetId && sheetId.trim()) {
+      refreshSmartsheetCache(token.trim(), sheetId.trim()).then(() => {
+        console.log("[SmartsheetCache] Pre-warmed at startup ✓");
+      }).catch(err => {
+        console.warn("[SmartsheetCache] Pre-warm failed:", err.message);
+      });
+    }
+  }, 1000);
 });
