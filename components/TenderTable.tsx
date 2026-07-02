@@ -208,7 +208,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
   ];
 
   // 2. States
-  const [overrides, setOverrides] = useState<Record<string, { tenderUpdateStatus?: string; nextAction?: string | null }>>({});
+  const [overrides, setOverrides] = useState<Record<string, { tenderUpdateStatus?: string; nextAction?: string | null; reverseAuctionApplicable?: boolean | null }>>({});
   const [savingKeys, setSavingKeys] = useState<Record<string, boolean>>({});
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: "success" | "error" }>>([]);
 
@@ -220,7 +220,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
     }, 4000);
   };
 
-  const handleUpdate = async (record: EpcTenderRecord, field: "tenderUpdateStatus" | "nextAction", value: any) => {
+  const handleUpdate = async (record: EpcTenderRecord, field: "tenderUpdateStatus" | "nextAction" | "reverseAuctionApplicable", value: any) => {
     if (!record.id) {
       showToast("Database record ID is not found. Please refresh and try again.", "error");
       return;
@@ -230,7 +230,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
 
     const previousValue = overrides[record.id]?.[field] !== undefined 
       ? overrides[record.id]?.[field] 
-      : record[field];
+      : record[field as keyof EpcTenderRecord];
 
     setOverrides(prev => ({
       ...prev,
@@ -243,6 +243,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
     try {
       const currentStatus = field === "tenderUpdateStatus" ? value : (overrides[record.id]?.tenderUpdateStatus ?? record.tenderUpdateStatus ?? "OPEN");
       const currentAction = field === "nextAction" ? value : (overrides[record.id]?.nextAction !== undefined ? overrides[record.id]?.nextAction : (record.nextAction ?? null));
+      const currentRa = field === "reverseAuctionApplicable" ? value : (overrides[record.id]?.reverseAuctionApplicable !== undefined ? overrides[record.id]?.reverseAuctionApplicable : (record.reverseAuctionApplicable ?? false));
 
       const response = await fetch(`/api/tenders/${record.id}`, {
         method: "PATCH",
@@ -251,7 +252,8 @@ export const TenderTable: React.FC<TenderTableProps> = ({
         },
         body: JSON.stringify({
           tenderUpdateStatus: currentStatus,
-          nextAction: currentAction
+          nextAction: currentAction,
+          reverseAuctionApplicable: currentRa
         })
       });
 
@@ -700,8 +702,12 @@ export const TenderTable: React.FC<TenderTableProps> = ({
 
     // Column RA? Header Filter
     if (raHeaderFilter !== "All") {
-      const isRa = raHeaderFilter === "YES";
-      result = result.filter(record => record.reverseAuctionApplicable === isRa);
+      if (raHeaderFilter === "BLANK") {
+        result = result.filter(record => record.reverseAuctionApplicable === null || record.reverseAuctionApplicable === undefined);
+      } else {
+        const isRa = raHeaderFilter === "YES";
+        result = result.filter(record => record.reverseAuctionApplicable === isRa);
+      }
     }
 
     // Column Participated? Header Filter
@@ -1332,6 +1338,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
                         }}
                       >
                         <option value="All">All</option>
+                        <option value="BLANK">(Blank)</option>
                         <option value="YES">YES</option>
                         <option value="NO">NO</option>
                       </select>
@@ -1621,15 +1628,43 @@ export const TenderTable: React.FC<TenderTableProps> = ({
                             }
                           } else if (col.type === "date") {
                             cellContent = formatDate(cellVal as Date | null);
-                            cellClass = "col-center";
-                          } else if (col.type === "boolean") {
-                            const isApp = cellVal as boolean;
-                            cellContent = (
-                              <span className={`ra-icon ${isApp ? "applicable" : "not-applicable"}`}>
-                                {isApp ? "✔" : "○"}
-                              </span>
-                            );
-                            cellClass = "col-center";
+                                               } else if (col.type === "boolean") {
+                            if (col.accessor === "reverseAuctionApplicable") {
+                              const raVal = overrides[record.id!]?.reverseAuctionApplicable !== undefined
+                                ? overrides[record.id!]?.reverseAuctionApplicable
+                                : record.reverseAuctionApplicable;
+                              const isSaving = !!savingKeys[`${record.id}::reverseAuctionApplicable`];
+                              
+                              let selectVal = "BLANK";
+                              if (raVal === true) selectVal = "YES";
+                              else if (raVal === false) selectVal = "NO";
+
+                              cellContent = (
+                                <select
+                                  value={selectVal}
+                                  disabled={isSaving}
+                                  onChange={(e) => {
+                                    const val = e.target.value === "YES" ? true : e.target.value === "NO" ? false : null;
+                                    handleUpdate(record, "reverseAuctionApplicable", val);
+                                  }}
+                                  className="table-editable-select status-select"
+                                  style={{ minWidth: "60px", padding: "2px 4px", fontSize: "11px" }}
+                                >
+                                  <option value="BLANK">(Blank)</option>
+                                  <option value="YES">Yes</option>
+                                  <option value="NO">No</option>
+                                </select>
+                              );
+                              cellClass = "col-center col-editable";
+                            } else {
+                              const isApp = cellVal as boolean;
+                              cellContent = (
+                                <span className={`ra-icon ${isApp ? "applicable" : "not-applicable"}`}>
+                                  {isApp ? "✔" : "○"}
+                                </span>
+                              );
+                              cellClass = "col-center";
+                            }
                           } else if (col.type === "status") {
                             const statusVal = (cellVal as string) || "";
                             cellContent = statusVal ? (

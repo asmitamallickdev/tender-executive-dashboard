@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import XLSX from "xlsx";
 import { DatabaseTenderService } from "../services/databaseTenderService.js";
+import { analyzeCostingSheet } from "../services/costingSheetAnalyzer.js";
 
 // Native multiline-aware .env file loader for local development testing (e.g. vercel dev)
 try {
@@ -61,6 +62,17 @@ async function getCostingDetails(attachmentUrl, docketNo) {
     } catch (err) {
       console.warn(`[Cache] Error downloading Excel for docket "${docketNo}": ${err.message}`);
       return null;
+    }
+  }
+
+  if (fileExists) {
+    try {
+      const analysis = analyzeCostingSheet(localPath);
+      const analysisPath = localPath.replace(/\.xlsx$/, ".analysis.json");
+      fs.writeFileSync(analysisPath, JSON.stringify(analysis, null, 2));
+      console.log(`[Analyzer] Docket "${docketNo}": ${analysis.items.length} items, ${analysis.materialsFound.length} materials`);
+    } catch (analysisErr) {
+      console.warn(`[Analyzer] Error analyzing docket "${docketNo}": ${analysisErr.message}`);
     }
   }
 

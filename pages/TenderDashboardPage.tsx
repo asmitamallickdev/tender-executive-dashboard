@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { useSmartsheetTenders } from "../hooks/useSmartsheetTenders";
 import { SmartsheetTender } from "../types/smartsheetTender";
 import "./TenderDashboard.css";
@@ -13,16 +13,16 @@ interface ColDef {
 }
 
 const COLUMNS: ColDef[] = [
-  { key: "enquiryDate",     label: "Enquiry Date",      width: 120 },
-  { key: "partyName",       label: "Party Name",         width: 200 },
-  { key: "docketNumber",    label: "Docket Number",      width: 140 },
-  { key: "utility",         label: "Utility",            width: 180 },
-  { key: "quotationNumber", label: "Quotation Number",   width: 150 },
-  { key: "tenderPurchase",  label: "Tender / Purchase",  width: 130 },
-  { key: "proposedQty",     label: "Tender Qty",         width: 120 },
-  { key: "attachmentUrl",   label: "Attachment",         width: 110 },
-  { key: "priceBasis",      label: "Price Basis",        width: 100 },
-  { key: "rawMaterials",    label: "Raw Materials",      width: 220 },
+  { key: "enquiryDate",     label: "Enquiry Date",      width: 180 },
+  { key: "partyName",       label: "Party Name",         width: 220 },
+  { key: "docketNumber",    label: "Docket Number",      width: 160 },
+  { key: "utility",         label: "Utility",            width: 200 },
+  { key: "quotationNumber", label: "Quotation Number",   width: 170 },
+  { key: "tenderPurchase",  label: "Tender / Purchase",  width: 150 },
+  { key: "proposedQty",     label: "Tender Qty",         width: 140 },
+  { key: "attachmentUrl",   label: "Attachment",         width: 130 },
+  { key: "priceBasis",      label: "Price Basis",        width: 130 },
+  { key: "rawMaterials",    label: "Raw Materials",      width: 260 },
 ];
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
@@ -61,38 +61,225 @@ export const TenderDashboardPage: React.FC = () => {
   const [sortDir, setSortDir]     = useState<SortDir>("desc");
   const [page, setPage]           = useState(1);
   const [pageSize, setPageSize]   = useState(50);
-  const [typeFilter, setTypeFilter] = useState("All");
 
-  const handleClearAllFilters = () => {
-    setSearch("");
-    setTypeFilter("All");
+  // Column search states (maps each column key to its search term, excluding attachmentUrl)
+  const [colSearches, setColSearches] = useState<Record<string, string>>({
+    enquiryDate: "",
+    partyName: "",
+    docketNumber: "",
+    utility: "",
+    quotationNumber: "",
+    tenderPurchase: "",
+    proposedQty: "",
+    priceBasis: "",
+    rawMaterials: "",
+  });
+
+  // Specialized filters states
+  const [enquiryStartDate, setEnquiryStartDate] = useState("");
+  const [enquiryEndDate, setEnquiryEndDate] = useState("");
+  const [tenderPurchaseFilter, setTenderPurchaseFilter] = useState("All");
+  const [priceBasisFilter, setPriceBasisFilter] = useState("All");
+  const [alMin, setAlMin] = useState("");
+  const [alMax, setAlMax] = useState("");
+  const [cuMin, setCuMin] = useState("");
+  const [cuMax, setCuMax] = useState("");
+
+  // Party Name Multi-select dropdown states
+  const [showPartyDropdown, setShowPartyDropdown] = useState(false);
+  const [selectedParties, setSelectedParties] = useState<string[]>([]);
+  const partyDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (partyDropdownRef.current && !partyDropdownRef.current.contains(event.target as Node)) {
+        setShowPartyDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const handleColSearchChange = (key: string, val: string) => {
+    setColSearches(prev => ({
+      ...prev,
+      [key]: val
+    }));
     setPage(1);
   };
 
-  // Unique purchase types for sidebar filter
+  const handleClearAllFilters = () => {
+    setSearch("");
+    setTenderPurchaseFilter("All");
+    setPriceBasisFilter("All");
+    setEnquiryStartDate("");
+    setEnquiryEndDate("");
+    setAlMin("");
+    setAlMax("");
+    setCuMin("");
+    setCuMax("");
+    setSelectedParties([]);
+    setShowPartyDropdown(false);
+    setColSearches({
+      enquiryDate: "",
+      partyName: "",
+      docketNumber: "",
+      utility: "",
+      quotationNumber: "",
+      tenderPurchase: "",
+      proposedQty: "",
+      priceBasis: "",
+      rawMaterials: "",
+    });
+    setPage(1);
+  };
+
+  // Unique purchase types for sidebar/column filters
   const purchaseTypes = useMemo(() => {
     const set = new Set<string>();
     data.forEach(r => { if (r.tenderPurchase) set.add(r.tenderPurchase); });
     return ["All", ...Array.from(set).sort()];
   }, [data]);
 
+  // Unique price basis options for dropdown filter
+  const priceBasisOptions = useMemo(() => {
+    const set = new Set<string>();
+    data.forEach(r => { if (r.priceBasis) set.add(r.priceBasis); });
+    return ["All", ...Array.from(set).sort()];
+  }, [data]);
+
+  // Unique party names for dropdown filter
+  const partyNamesList = useMemo(() => {
+    const set = new Set<string>();
+    data.forEach(r => { if (r.partyName) set.add(r.partyName.trim()); });
+    return ["All", ...Array.from(set).sort()];
+  }, [data]);
+
   // Filter
   const filtered = useMemo<SmartsheetTender[]>(() => {
     let rows = data;
-    if (typeFilter !== "All") {
-      rows = rows.filter(r => r.tenderPurchase === typeFilter);
+
+    // 1. Sidebar Type Filter / Column Type Filter (Tender / Purchase)
+    if (tenderPurchaseFilter !== "All") {
+      rows = rows.filter(r => r.tenderPurchase === tenderPurchaseFilter);
     }
+
+    // 2. Global search
     const q = search.trim().toLowerCase();
     if (q) {
       rows = rows.filter(row =>
         COLUMNS.some(col => {
+          if (col.key === "rawMaterials") {
+            const rates = [
+              row.aluminiumPrice,
+              row.aluminiumAlloyPrice,
+              row.copperTapePrice,
+              row.extrudedSemiconductivePrice,
+              row.htXlpePrice,
+              row.pvcTypeSt2Price,
+              row.galvanisedSteelFlatStripPrice,
+              row.fillerPrice
+            ];
+            return rates.some(p => p !== null && p !== undefined && String(p).includes(q));
+          }
           const v = row[col.key];
-          return v && v.toLowerCase().includes(q);
+          return v && String(v).toLowerCase().includes(q);
         })
       );
     }
+
+    // 3. Individual column searches
+    Object.entries(colSearches).forEach(([key, val]) => {
+      const sVal = val.trim().toLowerCase();
+      if (sVal) {
+        rows = rows.filter(row => {
+          if (key === "rawMaterials") {
+            const materials = [
+              { label: "al", price: row.aluminiumPrice },
+              { label: "al alloy", price: row.aluminiumAlloyPrice },
+              { label: "cu", price: row.copperTapePrice },
+              { label: "semicon", price: row.extrudedSemiconductivePrice },
+              { label: "xlpe", price: row.htXlpePrice },
+              { label: "st-2", price: row.pvcTypeSt2Price },
+              { label: "steel", price: row.galvanisedSteelFlatStripPrice },
+              { label: "filler", price: row.fillerPrice }
+            ];
+            return materials.some(m => 
+              m.price !== null && m.price !== undefined && 
+              (m.label.includes(sVal) || String(m.price).includes(sVal))
+            );
+          }
+          const v = row[key as keyof SmartsheetTender];
+          return v !== null && v !== undefined && String(v).toLowerCase().includes(sVal);
+        });
+      }
+    });
+
+    // 3b. Specialized: Party Name Multi-select Filter
+    if (selectedParties.length > 0) {
+      rows = rows.filter(row => row.partyName && selectedParties.includes(row.partyName.trim()));
+    }
+
+    // 4. Specialized: Enquiry Date Range Filter
+    if (enquiryStartDate) {
+      const start = new Date(enquiryStartDate);
+      rows = rows.filter(row => {
+        if (!row.enquiryDate) return false;
+        const d = new Date(row.enquiryDate);
+        return d >= start;
+      });
+    }
+    if (enquiryEndDate) {
+      const end = new Date(enquiryEndDate);
+      end.setHours(23, 59, 59, 999);
+      rows = rows.filter(row => {
+        if (!row.enquiryDate) return false;
+        const d = new Date(row.enquiryDate);
+        return d <= end;
+      });
+    }
+
+    // 5. Specialized: Price Basis Filter
+    if (priceBasisFilter !== "All") {
+      rows = rows.filter(row => {
+        const pb = row.priceBasis || "";
+        return pb.toLowerCase() === priceBasisFilter.toLowerCase();
+      });
+    }
+
+    // 6. Specialized: Raw Materials Aluminum & Copper Price Range Filters
+    if (alMin.trim() !== "" || alMax.trim() !== "") {
+      rows = rows.filter(row => {
+        if (row.aluminiumPrice === null || row.aluminiumPrice === undefined) return false;
+        const minVal = alMin.trim() !== "" ? parseFloat(alMin) : Number.NEGATIVE_INFINITY;
+        const maxVal = alMax.trim() !== "" ? parseFloat(alMax) : Number.POSITIVE_INFINITY;
+        return row.aluminiumPrice >= minVal && row.aluminiumPrice <= maxVal;
+      });
+    }
+    if (cuMin.trim() !== "" || cuMax.trim() !== "") {
+      rows = rows.filter(row => {
+        if (row.copperTapePrice === null || row.copperTapePrice === undefined) return false;
+        const minVal = cuMin.trim() !== "" ? parseFloat(cuMin) : Number.NEGATIVE_INFINITY;
+        const maxVal = cuMax.trim() !== "" ? parseFloat(cuMax) : Number.POSITIVE_INFINITY;
+        return row.copperTapePrice >= minVal && row.copperTapePrice <= maxVal;
+      });
+    }
+
     return rows;
-  }, [data, search, typeFilter]);
+  }, [
+    data, 
+    search, 
+    colSearches, 
+    tenderPurchaseFilter, 
+    selectedParties,
+    enquiryStartDate, 
+    enquiryEndDate, 
+    priceBasisFilter, 
+    alMin, 
+    alMax, 
+    cuMin, 
+    cuMax
+  ]);
 
   // Sort
   const sorted = useMemo<SmartsheetTender[]>(() => {
@@ -159,8 +346,8 @@ export const TenderDashboardPage: React.FC = () => {
             <div className="tender-filter-label">Type Filter</div>
             <select
               className="tender-filter-select"
-              value={typeFilter}
-              onChange={e => { setTypeFilter(e.target.value); setPage(1); }}
+              value={tenderPurchaseFilter}
+              onChange={e => { setTenderPurchaseFilter(e.target.value); setPage(1); }}
             >
               {purchaseTypes.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
@@ -202,14 +389,14 @@ export const TenderDashboardPage: React.FC = () => {
             <button className="clear-filters-btn" onClick={handleClearAllFilters}>
               🧹 Clear Filters
             </button>
-            <a
+            {/* <a
               href="http://192.168.0.230:2026/"
               target="_blank"
               rel="noopener noreferrer"
               className="ai-dashboard-btn"
             >
               🤖 AI Dashboard
-            </a>
+            </a> */}
           </div>
         </header>
 
@@ -270,10 +457,10 @@ export const TenderDashboardPage: React.FC = () => {
                 <div className="smartsheet-state-wrapper">
                   <span className="smartsheet-state-icon">📭</span>
                  <h3 className="smartsheet-state-title">
-                    {search || typeFilter !== "All" ? "No matching records" : "No Records"}
+                    {search || tenderPurchaseFilter !== "All" || enquiryStartDate || enquiryEndDate || priceBasisFilter !== "All" || alMin || alMax || cuMin || cuMax || Object.values(colSearches).some(Boolean) ? "No matching records" : "No Records"}
                   </h3>
                   <p className="smartsheet-state-sub">
-                    {search || typeFilter !== "All"
+                    {search || tenderPurchaseFilter !== "All" || enquiryStartDate || enquiryEndDate || priceBasisFilter !== "All" || alMin || alMax || cuMin || cuMax || Object.values(colSearches).some(Boolean)
                       ? "Try adjusting your search or type filter."
                       : "The Smartsheet returned no rows."}
                   </p>
@@ -291,15 +478,164 @@ export const TenderDashboardPage: React.FC = () => {
                             <th
                               key={col.key}
                               style={{ width: col.width, minWidth: col.width }}
-                              onClick={() => handleSort(col.key)}
                             >
-                              <div className="smartsheet-th-inner">
+                              <div className="smartsheet-th-inner" onClick={() => handleSort(col.key)}>
                                 {col.label}
                                 <span className="smartsheet-sort-icon">
                                   {sortField === col.key
                                     ? sortDir === "asc" ? "▲" : "▼"
                                     : "⇅"}
                                 </span>
+                              </div>
+                              <div className="column-filter-container" onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}>
+                                {col.key !== "attachmentUrl" && (
+                                  <input
+                                    type="text"
+                                    className="column-search-input"
+                                    placeholder="Search..."
+                                    value={colSearches[col.key] || ""}
+                                    onChange={e => handleColSearchChange(col.key, e.target.value)}
+                                  />
+                                )}
+                                {col.key === "partyName" && (
+                                  <div className="custom-multiselect-container" ref={partyDropdownRef}>
+                                    <button 
+                                      className="multiselect-trigger-btn"
+                                      onClick={() => setShowPartyDropdown(!showPartyDropdown)}
+                                    >
+                                      {selectedParties.length === 0 ? "All Parties" : `${selectedParties.length} Selected`} <span className="dropdown-arrow">▼</span>
+                                    </button>
+                                    {showPartyDropdown && (
+                                      <div className="multiselect-dropdown-panel">
+                                        <div className="multiselect-actions">
+                                          <button className="multiselect-action-btn" onClick={() => { setSelectedParties([]); setPage(1); }}>Clear All</button>
+                                          <button className="multiselect-action-btn" onClick={() => { setSelectedParties(partyNamesList.filter(p => p !== "All")); setPage(1); }}>Select All</button>
+                                        </div>
+                                        <div className="multiselect-options-list">
+                                          {partyNamesList.filter(p => p !== "All").map(party => (
+                                            <label key={party} className="multiselect-option-label">
+                                              <input 
+                                                type="checkbox"
+                                                checked={selectedParties.includes(party)}
+                                                onChange={() => {
+                                                  if (selectedParties.includes(party)) {
+                                                    setSelectedParties(selectedParties.filter(p => p !== party));
+                                                  } else {
+                                                    setSelectedParties([...selectedParties, party]);
+                                                  }
+                                                  setPage(1);
+                                                }}
+                                              />
+                                              <span>{party}</span>
+                                            </label>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                                {col.key === "enquiryDate" && (
+                                  <div className="column-date-filter">
+                                    <input
+                                      type="date"
+                                      className="date-filter-input"
+                                      value={enquiryStartDate}
+                                      onChange={e => { setEnquiryStartDate(e.target.value); setPage(1); }}
+                                      title="Start Date"
+                                    />
+                                    <span className="date-filter-to">to</span>
+                                    <input
+                                      type="date"
+                                      className="date-filter-input"
+                                      value={enquiryEndDate}
+                                      onChange={e => { setEnquiryEndDate(e.target.value); setPage(1); }}
+                                      title="End Date"
+                                    />
+                                    {(enquiryStartDate || enquiryEndDate) && (
+                                      <button
+                                        className="date-filter-clear-btn"
+                                        onClick={() => {
+                                          setEnquiryStartDate("");
+                                          setEnquiryEndDate("");
+                                          setPage(1);
+                                        }}
+                                        title="Clear date filter"
+                                      >
+                                        ✕
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                                {col.key === "tenderPurchase" && (
+                                  <select
+                                    className="price-basis-filter-select"
+                                    value={tenderPurchaseFilter}
+                                    onChange={e => { setTenderPurchaseFilter(e.target.value); setPage(1); }}
+                                  >
+                                    {purchaseTypes.map(t => (
+                                      <option key={t} value={t}>
+                                        {t}
+                                      </option>
+                                    ))}
+                                  </select>
+                                )}
+                                {col.key === "priceBasis" && (
+                                  <select
+                                    className="price-basis-filter-select"
+                                    value={priceBasisFilter}
+                                    onChange={e => { setPriceBasisFilter(e.target.value); setPage(1); }}
+                                  >
+                                    {priceBasisOptions.map(t => (
+                                      <option key={t} value={t}>
+                                        {t}
+                                      </option>
+                                    ))}
+                                  </select>
+                                )}
+                                {col.key === "rawMaterials" && (
+                                  <div className="column-raw-materials-filter">
+                                    <div className="filter-row">
+                                      <span className="filter-row-label">Al:</span>
+                                      <input
+                                        type="number"
+                                        placeholder="Min"
+                                        className="col-price-filter-input"
+                                        value={alMin}
+                                        onChange={e => { setAlMin(e.target.value); setPage(1); }}
+                                        title="Aluminium Min"
+                                      />
+                                      <span className="filter-row-dash">-</span>
+                                      <input
+                                        type="number"
+                                        placeholder="Max"
+                                        className="col-price-filter-input"
+                                        value={alMax}
+                                        onChange={e => { setAlMax(e.target.value); setPage(1); }}
+                                        title="Aluminium Max"
+                                      />
+                                    </div>
+                                    <div className="filter-row" style={{ marginTop: "4px" }}>
+                                      <span className="filter-row-label">Cu:</span>
+                                      <input
+                                        type="number"
+                                        placeholder="Min"
+                                        className="col-price-filter-input"
+                                        value={cuMin}
+                                        onChange={e => { setCuMin(e.target.value); setPage(1); }}
+                                        title="Copper Min"
+                                      />
+                                      <span className="filter-row-dash">-</span>
+                                      <input
+                                        type="number"
+                                        placeholder="Max"
+                                        className="col-price-filter-input"
+                                        value={cuMax}
+                                        onChange={e => { setCuMax(e.target.value); setPage(1); }}
+                                        title="Copper Max"
+                                      />
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             </th>
                           ))}
@@ -339,8 +675,23 @@ export const TenderDashboardPage: React.FC = () => {
                                 : <span className="smartsheet-null-cell">—</span>}
                             </td>
                             {/* Tender Qty */}
-                            <td className="text-pre-line">
-                              {row.proposedQty ?? <span className="smartsheet-null-cell">—</span>}
+                            <td className="col-tender-qty text-pre-line">
+                              {(() => {
+                                if (!row.proposedQty) return <span className="smartsheet-null-cell">—</span>;
+                                const parts = row.proposedQty.split(/[\n,;]+/).map(p => p.trim()).filter(Boolean);
+                                if (parts.length > 1) {
+                                  return (
+                                    <div className="tender-qty-stack" style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                                      {parts.map((part, pIdx) => (
+                                        <span className="tender-qty-item" key={pIdx} style={{ display: "inline-block", background: "#f1f3f4", padding: "2px 6px", borderRadius: "4px", fontSize: "11px", border: "1px solid #dadce0", width: "fit-content", color: "#202124" }}>
+                                          {part}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  );
+                                }
+                                return row.proposedQty;
+                              })()}
                             </td>
                             {/* Attachment */}
                             <td style={{ textAlign: "center" }}>

@@ -7,7 +7,7 @@ export class TenderController {
    */
   static async updateTender(req, res) {
     const { id } = req.params;
-    const { tenderUpdateStatus, nextAction } = req.body;
+    const { tenderUpdateStatus, nextAction, reverseAuctionApplicable } = req.body;
 
     if (!tenderUpdateStatus) {
       return res.status(400).json({ error: "tenderUpdateStatus is required" });
@@ -29,11 +29,16 @@ export class TenderController {
       return res.status(400).json({ error: "Invalid nextAction value" });
     }
 
+    if (reverseAuctionApplicable !== undefined && typeof reverseAuctionApplicable !== "boolean") {
+      return res.status(400).json({ error: "reverseAuctionApplicable must be a boolean" });
+    }
+
     try {
       const updated = await DatabaseTenderService.updateTenderStatusAndAction(
         id,
         tenderUpdateStatus,
-        nextAction
+        nextAction,
+        reverseAuctionApplicable
       );
       return res.status(200).json(updated);
     } catch (err) {

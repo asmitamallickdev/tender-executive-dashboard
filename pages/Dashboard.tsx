@@ -202,14 +202,14 @@ export const Dashboard: React.FC = () => {
             
           </div>
           <div className="header-actions">
-            <a 
+            {/* <a 
               href="http://192.168.0.230:2026/" 
               target="_blank" 
               rel="noopener noreferrer" 
               className="ai-dashboard-btn"
             >
               🤖 AI Dashboard
-            </a>
+            </a> */}
             <button className="clear-filters-btn" onClick={handleClearAllFilters}>
               🧹 Clear Filters
             </button>

@@ -521,7 +521,11 @@ export class GoogleSheetService {
       tenderPrepareBy: getValue("Tender Prepare By"),
       currentStatus: this.mapSheetStatusToCurrentStatus(getValue("Current Status")),
       tenderSubmittedDate: parseDate(getValue("Tender Submitted Date")),
-      reverseAuctionApplicable: parseBool(getValue("Reverse Auction Applicable")),
+      reverseAuctionApplicable: (() => {
+        const val = getValue("Reverse Auction Applicable");
+        if (!val || val.trim() === "" || val === "-") return null;
+        return parseBool(val);
+      })(),
       reverseAuctionDate: parseDate(getValue("Reverse Auction Date")),
       emdPaymentMode: parseEnum(getValue("EMD Payment Through BG / NEFT"), EMDExchangeMode, EMDExchangeMode.NOT_APPLICABLE),
       bgNoUtrNo: getValue("BG No / UTR No") || null,

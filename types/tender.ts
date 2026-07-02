@@ -103,7 +103,7 @@ export interface EpcTenderRecord {
   tenderSubmittedDate: Date | null;
 
   /** Column: "Reverse Auction Applicable" - Yes / No flag */
-  reverseAuctionApplicable: boolean;
+  reverseAuctionApplicable: boolean | null;
 
   /** Column: "Reverse Auction Date" - Scheduled date of Reverse Auction */
   reverseAuctionDate: Date | null;

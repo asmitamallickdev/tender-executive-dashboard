@@ -46,7 +46,7 @@ model Tender {
   tenderPrepareBy    String @map("Tender Prepare By")
   currentStatus      String @map("Current Status")
   tenderSubmittedDate DateTime? @map("Tender Submitted Date")
-  reverseAuctionApplicable Boolean @map("Reverse Auction Applicable")
+  reverseAuctionApplicable Boolean? @map("Reverse Auction Applicable")
   reverseAuctionDate DateTime? @map("Reverse Auction Date")
   emdPaymentMode     String? @map("EMD Payment Through BG / NEFT")
   bgNoUtrNo          String? @map("BG No / UTR No")

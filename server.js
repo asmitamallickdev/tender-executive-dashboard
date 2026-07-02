@@ -7,6 +7,7 @@ import XLSX from "xlsx";
 import { registerAttachmentRoutes } from "./controllers/tenderAttachmentController.js";
 import { registerTenderRoutes } from "./controllers/tenderController.js";
 import { DatabaseTenderService } from "./services/databaseTenderService.js";
+import { analyzeCostingSheet } from "./services/costingSheetAnalyzer.js";
 
 // Native multiline-aware .env file loader
 try {
@@ -631,6 +632,17 @@ async function getCostingDetails(attachmentUrl, docketNo, driveAccessToken) {
     } catch (err) {
       console.warn(`[Cache] Error downloading Excel for docket "${docketNo}": ${err.message}`);
       return null;
+    }
+  }
+
+  if (fileExists) {
+    try {
+      const analysis = analyzeCostingSheet(localPath);
+      const analysisPath = localPath.replace(/\.xlsx$/, ".analysis.json");
+      fs.writeFileSync(analysisPath, JSON.stringify(analysis, null, 2));
+      console.log(`[Analyzer] Docket "${docketNo}": ${analysis.items.length} items, ${analysis.materialsFound.length} materials`);
+    } catch (analysisErr) {
+      console.warn(`[Analyzer] Error analyzing docket "${docketNo}": ${analysisErr.message}`);
     }
   }
 
@@ -1817,7 +1829,11 @@ function parseRow(row, headerMap, rowNum) {
     tenderPrepareBy: getValue("Tender Prepare By"),
     currentStatus: mapStatus(getValue("Current Status")),
     tenderSubmittedDate: parseDate(getValue("Tender Submitted Date")),
-    reverseAuctionApplicable: parseBool(getValue("Reverse Auction Applicable")),
+    reverseAuctionApplicable: (() => {
+      const val = getValue("Reverse Auction Applicable");
+      if (!val || val.trim() === "" || val === "-") return null;
+      return parseBool(val);
+    })(),
     reverseAuctionDate: parseDate(getValue("Reverse Auction Date")),
     emdPaymentMode: getValue("EMD Payment Through BG / NEFT") || "",
     bgNoUtrNo: getValue("BG No / UTR No") || null,

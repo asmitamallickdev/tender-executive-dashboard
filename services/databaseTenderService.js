@@ -90,8 +90,8 @@ const isRecordModified = (sheet, db) => {
       if (isV1NaN && isV2NaN) continue;
       if (isV1NaN || isV2NaN || v1 !== v2) return true;
     } else if (field.type === "boolean") {
-      const v1 = Boolean(sheetVal);
-      const v2 = Boolean(dbVal);
+      const v1 = sheetVal === null || sheetVal === undefined ? null : Boolean(sheetVal);
+      const v2 = dbVal === null || dbVal === undefined ? null : Boolean(dbVal);
       if (v1 !== v2) return true;
     } else {
       const v1 = (sheetVal || "").toString().trim();
@@ -164,7 +164,7 @@ export class DatabaseTenderService {
         tenderPrepareBy: record.tenderPrepareBy || "",
         currentStatus: record.currentStatus || "",
         tenderSubmittedDate: cleanDate(record.tenderSubmittedDate),
-        reverseAuctionApplicable: Boolean(record.reverseAuctionApplicable),
+        reverseAuctionApplicable: record.reverseAuctionApplicable === null ? null : Boolean(record.reverseAuctionApplicable),
         reverseAuctionDate: cleanDate(record.reverseAuctionDate),
         emdPaymentMode: record.emdPaymentMode || null,
         bgNoUtrNo: record.bgNoUtrNo || null,
@@ -222,13 +222,17 @@ export class DatabaseTenderService {
   /**
    * Updates only the two application-managed fields.
    */
-  static async updateTenderStatusAndAction(id, tenderUpdateStatus, nextAction) {
+  static async updateTenderStatusAndAction(id, tenderUpdateStatus, nextAction, reverseAuctionApplicable) {
+    const data = {
+      tenderUpdateStatus,
+      nextAction,
+    };
+    if (reverseAuctionApplicable !== undefined) {
+      data.reverseAuctionApplicable = reverseAuctionApplicable;
+    }
     return prisma.tender.update({
       where: { id },
-      data: {
-        tenderUpdateStatus,
-        nextAction,
-      },
+      data,
     });
   }
 }
