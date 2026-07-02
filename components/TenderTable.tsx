@@ -32,6 +32,29 @@ const fetchDocketFiles = (docketNo: string): Promise<any[]> => {
   return promise;
 };
 
+const matchesErpItemCategory = (itemName: string | undefined | null, category: string): boolean => {
+  if (!itemName) return false;
+  const lowerName = itemName.toLowerCase();
+  const lowerCategory = category.toLowerCase();
+  
+  if (lowerCategory === "ab cable") {
+    return lowerName.includes("ab cable") || lowerName.includes("ab cables");
+  }
+  if (lowerCategory === "conductor") {
+    return lowerName.includes("conductor") || lowerName.includes("acsr") || lowerName.includes("aaac") || lowerName.includes("a.c.s.r.");
+  }
+  if (lowerCategory === "xlpe cable") {
+    return lowerName.includes("xlpe") && !lowerName.includes("ab cable") && !lowerName.includes("ab cables");
+  }
+  if (lowerCategory === "pvc cable") {
+    return lowerName.includes("pvc");
+  }
+  if (lowerCategory === "control cable") {
+    return lowerName.includes("control") || lowerName.includes("instrumentation");
+  }
+  return false;
+};
+
 const FilesCell: React.FC<{
   docketNo: string;
   onOpenModal: (docket: string) => void;
@@ -126,6 +149,7 @@ interface TenderTableProps {
   setCopperMin?: (val: string) => void;
   copperMax?: string;
   setCopperMax?: (val: string) => void;
+  clearTrigger?: number;
 }
 
 interface ColumnDef {
@@ -147,7 +171,8 @@ export const TenderTable: React.FC<TenderTableProps> = ({
   copperMin,
   setCopperMin,
   copperMax,
-  setCopperMax
+  setCopperMax,
+  clearTrigger
 }) => {
   // 1. Column Definitions
   const columns: ColumnDef[] = [
@@ -178,9 +203,83 @@ export const TenderTable: React.FC<TenderTableProps> = ({
     { header: "Diff L2 (%)", accessor: "diffPercentFromL2", defaultWidth: 100, align: "right", type: "percentage" },
     { header: "Competitors", accessor: "competitors", defaultWidth: 250, align: "left", type: "custom" },
     { header: "Remarks", accessor: "remarks", defaultWidth: 200, align: "left", type: "string" },
+    { header: "Tender Update Status", accessor: "tenderUpdateStatus", defaultWidth: 150, align: "center", type: "custom" },
+    { header: "Next Action", accessor: "nextAction", defaultWidth: 220, align: "left", type: "custom" },
   ];
 
   // 2. States
+  const [overrides, setOverrides] = useState<Record<string, { tenderUpdateStatus?: string; nextAction?: string | null }>>({});
+  const [savingKeys, setSavingKeys] = useState<Record<string, boolean>>({});
+  const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: "success" | "error" }>>([]);
+
+  const showToast = (message: string, type: "success" | "error" = "success") => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 4000);
+  };
+
+  const handleUpdate = async (record: EpcTenderRecord, field: "tenderUpdateStatus" | "nextAction", value: any) => {
+    if (!record.id) {
+      showToast("Database record ID is not found. Please refresh and try again.", "error");
+      return;
+    }
+    const key = `${record.id}::${field}`;
+    setSavingKeys(prev => ({ ...prev, [key]: true }));
+
+    const previousValue = overrides[record.id]?.[field] !== undefined 
+      ? overrides[record.id]?.[field] 
+      : record[field];
+
+    setOverrides(prev => ({
+      ...prev,
+      [record.id!]: {
+        ...prev[record.id!],
+        [field]: value
+      }
+    }));
+
+    try {
+      const currentStatus = field === "tenderUpdateStatus" ? value : (overrides[record.id]?.tenderUpdateStatus ?? record.tenderUpdateStatus ?? "OPEN");
+      const currentAction = field === "nextAction" ? value : (overrides[record.id]?.nextAction !== undefined ? overrides[record.id]?.nextAction : (record.nextAction ?? null));
+
+      const response = await fetch(`/api/tenders/${record.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          tenderUpdateStatus: currentStatus,
+          nextAction: currentAction
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Failed to update tender");
+      }
+
+      showToast(`Tender ${record.docketNo} updated successfully!`, "success");
+    } catch (err: any) {
+      console.error(err);
+      setOverrides(prev => ({
+        ...prev,
+        [record.id!]: {
+          ...prev[record.id!],
+          [field]: previousValue
+        }
+      }));
+      showToast(err.message || "Failed to save tender updates. Reverting changes.", "error");
+    } finally {
+      setSavingKeys(prev => {
+        const copy = { ...prev };
+        delete copy[key];
+        return copy;
+      });
+    }
+  };
+
   const [globalSearch, setGlobalSearch] = useState<string>("");
   const [sortColumn, setSortColumn] = useState<keyof EpcTenderRecord | "rawMaterials" | "files" | "boqChart" | null>("lastDateOfSubmission");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
@@ -205,6 +304,32 @@ export const TenderTable: React.FC<TenderTableProps> = ({
   const [bgStatusHeaderFilter, setBgStatusHeaderFilter] = useState<string>("All");
   const [remarksTextFilter, setRemarksTextFilter] = useState<string>("");
   const [remarksDropdownFilter, setRemarksDropdownFilter] = useState<string>("All");
+  const [proposedErpItemTextFilter, setProposedErpItemTextFilter] = useState<string>("");
+  const [proposedErpItemCategoryFilter, setProposedErpItemCategoryFilter] = useState<string>("All");
+
+  React.useEffect(() => {
+    if (clearTrigger) {
+      setGlobalSearch("");
+      setStartDate("");
+      setEndDate("");
+      setStatusHeaderFilter("All");
+      setDecisionHeaderFilter("All");
+      setEmdPaymentHeaderFilter("All");
+      setTenderForHeaderFilter("All");
+      setTypeHeaderFilter("All");
+      setPrepareByHeaderFilter("All");
+      setRaHeaderFilter("All");
+      setParticipatedHeaderFilter("All");
+      setStatusCategoryHeaderFilter("All");
+      setItemCategoryHeaderFilter("All");
+      setBgStatusHeaderFilter("All");
+      setRemarksTextFilter("");
+      setRemarksDropdownFilter("All");
+      setProposedErpItemTextFilter("");
+      setProposedErpItemCategoryFilter("All");
+      setCurrentPage(1);
+    }
+  }, [clearTrigger]);
 
   // Helper for cascading dependent filters
 
@@ -285,6 +410,15 @@ export const TenderTable: React.FC<TenderTableProps> = ({
         result = result.filter(record => record.bgStatus === bgStatusHeaderFilter);
       }
     }
+    if (excludeAccessor !== "proposedErpItemName") {
+      if (proposedErpItemCategoryFilter !== "All") {
+        result = result.filter(record => matchesErpItemCategory(record.proposedErpItemName, proposedErpItemCategoryFilter));
+      }
+      if (proposedErpItemTextFilter.trim() !== "") {
+        const searchLower = proposedErpItemTextFilter.toLowerCase().trim();
+        result = result.filter(record => record.proposedErpItemName && record.proposedErpItemName.toLowerCase().includes(searchLower));
+      }
+    }
 
     return result;
   };
@@ -295,7 +429,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
       .map(r => r.bgStatus)
       .filter((s): s is string => !!s && s.trim() !== "");
     return Array.from(new Set(list)).sort();
-  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter]);
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, proposedErpItemTextFilter, proposedErpItemCategoryFilter]);
 
   const uniqueRemarks = useMemo(() => {
     const filtered = getFilteredRecordsExcept("remarks");
@@ -309,7 +443,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
     return Object.keys(counts)
       .filter(key => counts[key] > 1)
       .sort();
-  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, bgStatusHeaderFilter]);
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, bgStatusHeaderFilter, proposedErpItemTextFilter, proposedErpItemCategoryFilter]);
 
   const uniqueStatuses = useMemo(() => {
     const filtered = getFilteredRecordsExcept("currentStatus");
@@ -317,7 +451,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
       .map(r => r.currentStatus)
       .filter((s): s is string => !!s && s.trim() !== "");
     return Array.from(new Set(statuses)).sort();
-  }, [records, globalSearch, startDate, endDate, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+  }, [records, globalSearch, startDate, endDate, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter, proposedErpItemTextFilter, proposedErpItemCategoryFilter]);
 
   const uniqueStatusCategories = useMemo(() => {
     const filtered = getFilteredRecordsExcept("statusCategory");
@@ -325,7 +459,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
       .map(r => r.statusCategory)
       .filter((s): s is string => !!s && s.trim() !== "");
     return Array.from(new Set(categories)).sort();
-  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter, proposedErpItemTextFilter, proposedErpItemCategoryFilter]);
 
   const uniqueEmdPaymentModes = useMemo(() => {
     const filtered = getFilteredRecordsExcept("emdPaymentMode");
@@ -333,7 +467,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
       .map(r => r.emdPaymentMode)
       .filter((m): m is EMDExchangeMode => m !== null && m !== undefined);
     return Array.from(new Set(modes)).sort();
-  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter, proposedErpItemTextFilter, proposedErpItemCategoryFilter]);
 
   const uniqueTenderFor = useMemo(() => {
     const filtered = getFilteredRecordsExcept("tenderFor");
@@ -341,7 +475,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
       .map(r => r.tenderFor)
       .filter((s): s is string => !!s && s.trim() !== "");
     return Array.from(new Set(list)).sort();
-  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter, proposedErpItemTextFilter, proposedErpItemCategoryFilter]);
 
   const uniqueTypes = useMemo(() => {
     const filtered = getFilteredRecordsExcept("typeOfTender");
@@ -349,7 +483,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
       .map(r => r.typeOfTender)
       .filter((s): s is string => !!s && s.trim() !== "");
     return Array.from(new Set(list)).sort();
-  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter, proposedErpItemTextFilter, proposedErpItemCategoryFilter]);
 
   const uniqueItemCategories = useMemo(() => {
     const filtered = getFilteredRecordsExcept("itemCategory");
@@ -357,7 +491,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
       .map(r => r.itemCategory)
       .filter((s): s is string => !!s && s.trim() !== "");
     return Array.from(new Set(list)).sort();
-  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter, proposedErpItemTextFilter, proposedErpItemCategoryFilter]);
 
   const uniquePrepareBy = useMemo(() => {
     const filtered = getFilteredRecordsExcept("tenderPrepareBy");
@@ -365,7 +499,7 @@ export const TenderTable: React.FC<TenderTableProps> = ({
       .map(r => r.tenderPrepareBy)
       .filter((s): s is string => !!s && s.trim() !== "");
     return Array.from(new Set(list)).sort();
-  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter]);
+  }, [records, globalSearch, startDate, endDate, statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter, tenderForHeaderFilter, typeHeaderFilter, raHeaderFilter, participatedHeaderFilter, statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksDropdownFilter, bgStatusHeaderFilter, proposedErpItemTextFilter, proposedErpItemCategoryFilter]);
 
   const handleOpenAttachmentModal = (docketNo: string) => {
     setSelectedDocketNo(docketNo);
@@ -608,12 +742,22 @@ export const TenderTable: React.FC<TenderTableProps> = ({
       result = result.filter(record => record.remarks && record.remarks.toLowerCase().includes(searchLower));
     }
 
+    // Proposed ERP Item Name Header Filters
+    if (proposedErpItemCategoryFilter !== "All") {
+      result = result.filter(record => matchesErpItemCategory(record.proposedErpItemName, proposedErpItemCategoryFilter));
+    }
+    if (proposedErpItemTextFilter.trim() !== "") {
+      const searchLower = proposedErpItemTextFilter.toLowerCase().trim();
+      result = result.filter(record => record.proposedErpItemName && record.proposedErpItemName.toLowerCase().includes(searchLower));
+    }
+
     return result;
   }, [
     records, globalSearch, sortColumn, sortDirection, startDate, endDate, 
     statusHeaderFilter, decisionHeaderFilter, emdPaymentHeaderFilter,
     tenderForHeaderFilter, typeHeaderFilter, prepareByHeaderFilter, raHeaderFilter, participatedHeaderFilter,
-    statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksTextFilter, remarksDropdownFilter, bgStatusHeaderFilter
+    statusCategoryHeaderFilter, itemCategoryHeaderFilter, remarksTextFilter, remarksDropdownFilter, bgStatusHeaderFilter,
+    proposedErpItemTextFilter, proposedErpItemCategoryFilter
   ]);
 
   // 6. Pagination Calculations
@@ -1091,6 +1235,41 @@ export const TenderTable: React.FC<TenderTableProps> = ({
                       </select>
                     </div>
                   )}
+                  {col.accessor === "proposedErpItemName" && (
+                    <div 
+                      className="column-remarks-filter" 
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      style={{ marginTop: "4px" }}
+                    >
+                      <input
+                        type="text"
+                        className="remarks-search-input"
+                        placeholder="Search items..."
+                        value={proposedErpItemTextFilter}
+                        onChange={(e) => {
+                          setProposedErpItemTextFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      />
+                      <select
+                        className="remarks-filter-select"
+                        style={{ marginTop: "4px", width: "100%" }}
+                        value={proposedErpItemCategoryFilter}
+                        onChange={(e) => {
+                          setProposedErpItemCategoryFilter(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <option value="All">All Categories</option>
+                        <option value="AB Cable">AB Cable</option>
+                        <option value="Conductor">Conductor</option>
+                        <option value="XLPE Cable">XLPE Cable</option>
+                        <option value="PVC Cable">PVC Cable</option>
+                        <option value="Control Cable">Control Cable</option>
+                      </select>
+                    </div>
+                  )}
                   {col.accessor === "typeOfTender" && (
                     <div 
                       className="column-type-filter" 
@@ -1371,6 +1550,41 @@ export const TenderTable: React.FC<TenderTableProps> = ({
                             <span>-</span>
                           );
                           cellClass = "col-left";
+                        } else if (col.accessor === "tenderUpdateStatus") {
+                          const statusValue = overrides[record.id!]?.tenderUpdateStatus ?? record.tenderUpdateStatus ?? "OPEN";
+                          const isSaving = !!savingKeys[`${record.id}::tenderUpdateStatus`];
+                          cellContent = (
+                            <select
+                              value={statusValue}
+                              disabled={isSaving}
+                              onChange={(e) => handleUpdate(record, "tenderUpdateStatus", e.target.value)}
+                              className="table-editable-select status-select"
+                            >
+                              <option value="OPEN">Open</option>
+                              <option value="CLOSED">Closed</option>
+                            </select>
+                          );
+                          cellClass = "col-center col-editable";
+                        } else if (col.accessor === "nextAction") {
+                          const actionValue = overrides[record.id!]?.nextAction !== undefined 
+                            ? overrides[record.id!]?.nextAction 
+                            : (record.nextAction ?? "");
+                          const isSaving = !!savingKeys[`${record.id}::nextAction`];
+                          cellContent = (
+                            <select
+                              value={actionValue || ""}
+                              disabled={isSaving}
+                              onChange={(e) => handleUpdate(record, "nextAction", e.target.value || null)}
+                              className="table-editable-select action-select"
+                            >
+                              <option value="">None</option>
+                              <option value="UPDATE_FROM_AB_LETTER">Update from AB letter</option>
+                              <option value="BG_REFUND_LETTER_TO_BE_SENT">BG refund letter to be sent</option>
+                              <option value="FOLLOW_UP_FOR_FINANCIAL_STATUS">Follow up for financial status</option>
+                              <option value="REVERSE_AUCTION_PENDING">Reverse auction pending</option>
+                            </select>
+                          );
+                          cellClass = "col-left col-editable";
                         } else {
                           cellVal = record[col.accessor as keyof EpcTenderRecord];
                           
@@ -1667,6 +1881,21 @@ export const TenderTable: React.FC<TenderTableProps> = ({
         onClose={() => setIsAttachmentModalOpen(false)} 
         docketNo={selectedDocketNo} 
       />
+
+      {/* Premium Toast Overlay */}
+      <div className="premium-toast-container">
+        {toasts.map(t => (
+          <div key={t.id} className={`premium-toast ${t.type}`}>
+            <span className="premium-toast-icon">
+              {t.type === "success" ? "✓" : "⚠️"}
+            </span>
+            <div className="premium-toast-content">{t.message}</div>
+            <button className="premium-toast-close" onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))}>
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 };

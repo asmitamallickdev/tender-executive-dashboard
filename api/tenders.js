@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import XLSX from "xlsx";
+import { DatabaseTenderService } from "../services/databaseTenderService.js";
 
 // Native multiline-aware .env file loader for local development testing (e.g. vercel dev)
 try {
@@ -484,6 +485,71 @@ function loadBoqCache(dataDir) {
 }
 
 /**
+ * Helper to identify if a string matches a date format.
+ */
+function isDate(str) {
+  return /^\d{1,2}[-.\/][a-z0-9]{2,4}[-.\/]\d{2,4}$/i.test(str);
+}
+
+/**
+ * Parses and extracts a clean bank guarantee (BG) number from the raw input text.
+ */
+function extractBgNumber(str) {
+  if (!str) return "";
+  
+  const trimmed = str.trim();
+  
+  // 1. Check if it's the Excel tab-separated paste format (usually contains BG No\tBG Date or multiple tabs/newlines)
+  if (trimmed.includes("\t") && (trimmed.toLowerCase().includes("bg no\t") || trimmed.toLowerCase().includes("bg date"))) {
+    const lines = trimmed.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (lines.length > 1) {
+      const cols = lines[1].split("\t").map(c => c.trim()).filter(Boolean);
+      if (cols.length > 0) {
+        const candidate = cols[0].replace(/['"]/g, "").trim();
+        if (!isDate(candidate)) {
+          return candidate;
+        }
+      }
+    }
+  }
+
+  // 2. Look for explicit prefixes: "BG No :", "BG No:", "BG No-", "BG No.", "BG "
+  // We want to capture the alphanumeric string right after.
+  const explicitRegex = /(?:bg\s*no\s*[:.-]?\s*|bg\s+)([a-z0-9]{8,25})/i;
+  const match = trimmed.match(explicitRegex);
+  if (match) {
+    const candidate = match[1];
+    if (!isDate(candidate)) {
+      return candidate;
+    }
+  }
+
+  // 3. Fallback: If no explicit prefix matches, let's see if the word starts with a known BG pattern (e.g. contains "BG" or is a long number)
+  const words = trimmed.split(/[\s,;:\r\n\t]+/).map(w => w.trim()).filter(Boolean);
+  for (const word of words) {
+    const cleanWord = word.replace(/[^a-z0-9]/ig, "");
+    if (cleanWord.length >= 10 && cleanWord.length <= 20) {
+      const lower = cleanWord.toLowerCase();
+      if (!lower.includes("dated") && !lower.includes("issue") && !lower.includes("value") && !lower.includes("amount")) {
+        if (lower.includes("bg") && !isDate(word)) {
+          return cleanWord;
+        }
+      }
+    }
+  }
+
+  // Second pass: check for a long digit-only word
+  for (const word of words) {
+    const cleanWord = word.replace(/[^a-z0-9]/ig, "");
+    if (/^\d{12,20}$/.test(cleanWord) && !isDate(word)) {
+      return cleanWord;
+    }
+  }
+
+  return "";
+}
+
+/**
  * Serverless function route handler to fetch, validate, and parse Google Sheets tender data securely.
  */
 export default async function handler(req, res) {
@@ -498,8 +564,6 @@ export default async function handler(req, res) {
   
   if (req.method === "OPTIONS") {
     return res.status(200).end();
-The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.
-
   }
 
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
@@ -834,14 +898,31 @@ The above content does NOT show the entire file contents. If you need to view an
 
     // Parse BG Rows
     const bgMap = [];
-    if (bgRows.length > 1) {
-      const bgHeaders = bgRows[0].map(h => h.trim().toLowerCase());
-      const bgNoIdx = bgHeaders.indexOf("bg no");
-      const remarkIdx = bgHeaders.indexOf("remark");
-      const statusIdx = bgHeaders.indexOf("status");
+    if (bgRows.length > 0) {
+      // Dynamically find the header row by searching for a row containing "bg no" and "status" (case-insensitive)
+      let headerRowIdx = -1;
+      let bgNoIdx = -1;
+      let remarkIdx = -1;
+      let statusIdx = -1;
 
-      if (bgNoIdx !== -1 && statusIdx !== -1) {
-        for (let i = 1; i < bgRows.length; i++) {
+      for (let i = 0; i < Math.min(bgRows.length, 5); i++) {
+        const row = bgRows[i];
+        if (row) {
+          const normalized = row.map(h => String(h || "").trim().toLowerCase());
+          const bgNo = normalized.indexOf("bg no");
+          const status = normalized.indexOf("status");
+          if (bgNo !== -1 && status !== -1) {
+            headerRowIdx = i;
+            bgNoIdx = bgNo;
+            remarkIdx = normalized.indexOf("remark");
+            statusIdx = status;
+            break;
+          }
+        }
+      }
+
+      if (headerRowIdx !== -1) {
+        for (let i = headerRowIdx + 1; i < bgRows.length; i++) {
           const row = bgRows[i];
           if (row && row.length > Math.max(bgNoIdx, statusIdx)) {
             const bgNo = String(row[bgNoIdx] || "").trim();
@@ -857,6 +938,8 @@ The above content does NOT show the entire file contents. If you need to view an
             });
           }
         }
+      } else {
+        console.warn("[WARNING] Could not find header row containing 'bg no' and 'status' in EMD DETAILS-BG sheet.");
       }
     }
 
@@ -886,11 +969,26 @@ The above content does NOT show the entire file contents. If you need to view an
       const rawBgNo = tender.bgNoUtrNo || "";
       const cleanDashBg = rawBgNo.toLowerCase().replace(/[^a-z0-9]/g, "");
 
+      // Extract and match bank guarantee (BG) number cleanly
+      const extractedBg = extractBgNumber(rawBgNo);
+      const cleanExtractedBg = extractedBg.toLowerCase().replace(/[^a-z0-9]/g, "");
+
       let bgMatch = null;
-      if (cleanDashBg) {
+      if (cleanExtractedBg) {
+        bgMatch = bgMap.find(b => b.cleanBgNo && b.cleanBgNo === cleanExtractedBg);
+      }
+
+      // Fallback 1: Substring match on extracted BG
+      if (!bgMatch && cleanExtractedBg) {
+        bgMatch = bgMap.find(b => b.cleanBgNo && (cleanExtractedBg.includes(b.cleanBgNo) || b.cleanBgNo.includes(cleanExtractedBg)));
+      }
+
+      // Fallback 2: Substring match on the entire raw field
+      if (!bgMatch && cleanDashBg) {
         bgMatch = bgMap.find(b => b.cleanBgNo && (cleanDashBg.includes(b.cleanBgNo) || b.cleanBgNo.includes(cleanDashBg)));
       }
 
+      // Fallback 3: Search by tender number in BG remarks
       if (!bgMatch && cleanTenderNo) {
         bgMatch = bgMap.find(b => {
           if (!b.cleanRemark) return false;
@@ -900,6 +998,29 @@ The above content does NOT show the entire file contents. If you need to view an
 
       if (bgMatch) {
         bgStatus = bgMatch.status;
+      }
+
+      // Fallback Tender Number Remark Lookup (Executed only if primary BG Number lookup fails)
+      if (!bgStatus) {
+        if (tender.tenderNoNitNo) {
+          const rawTenderNo = String(tender.tenderNoNitNo).trim();
+          const coreTenderNo = rawTenderNo
+            .replace(/^(?:Tender Enquiry No\.|Tender Enquiry No|Tender No|NIT No)\s*[:.-]?\s*/i, "")
+            .replace(/[,.]\s*$/, "")
+            .trim();
+
+          if (coreTenderNo) {
+            const matchedBg = bgMap.find(b => {
+              const remark = String(b.remark || "").trim();
+              return remark.toLowerCase().includes(coreTenderNo.toLowerCase());
+            });
+            bgStatus = matchedBg ? (matchedBg.status || null) : null;
+          } else {
+            bgStatus = null;
+          }
+        } else {
+          bgStatus = null;
+        }
       }
 
       if (tender.attachmentUrl) {
@@ -951,11 +1072,59 @@ The above content does NOT show the entire file contents. If you need to view an
       };
     }));
 
-    return res.status(200).json(enrichedRecords);
+    // 1. Fetch current database records to merge enums and get database IDs (takes < 20ms)
+    const dbTenders = await DatabaseTenderService.getAllTenders();
+    const dbMap = new Map(dbTenders.map(t => [t.tenderNoNitNo, t]));
+
+    // 2. Build the merged dataset prioritizing live Google Sheet rows
+    const mergedRecords = enrichedRecords.map(enriched => {
+      const dbTender = dbMap.get(enriched.tenderNoNitNo);
+      if (dbTender) {
+        return {
+          ...enriched,
+          id: dbTender.id,
+          tenderUpdateStatus: dbTender.tenderUpdateStatus || "OPEN",
+          nextAction: dbTender.nextAction || null
+        };
+      }
+      return enriched;
+    });
+
+    // 3. Append any database-only records (created in the database, not in Google Sheets)
+    const sheetTenderNos = new Set(enrichedRecords.map(r => r.tenderNoNitNo));
+    dbTenders.forEach(dbTender => {
+      if (!sheetTenderNos.has(dbTender.tenderNoNitNo)) {
+        mergedRecords.push({
+          ...dbTender,
+          priceBasis: "Firm",
+          aluminiumPrice: null,
+          aluminiumAlloyPrice: null,
+          copperTapePrice: null,
+          extrudedSemiconductivePrice: null,
+          htXlpePrice: null,
+          pvcTypeSt2Price: null,
+          galvanisedSteelFlatStripPrice: null,
+          fillerPrice: null,
+          proposedErpItemName: "",
+          proposedQty: "",
+          competitors: "",
+          fileCount: 0,
+          hasBoqChart: false,
+          bgStatus: null
+        });
+      }
+    });
+
+    // 4. Trigger database upsert/comparison in the background concurrently
+    DatabaseTenderService.upsertTenders(enrichedRecords).catch(err => {
+      console.error("❌ Background database sync failure:", err);
+    });
+
+    return res.status(200).json(mergedRecords);
 
   } catch (err) {
-    console.error("❌ ERROR in serverless handler:", err.message);
-    return res.status(500).json({ error: err.message });
+    console.error("❌ ERROR in serverless handler:", err);
+    return res.status(500).json({ error: err.stack || err.message });
   }
 }
 
@@ -1123,5 +1292,3 @@ function parseRow(row, headerMap, rowNum) {
     finalRemarks: getValue("Final Remarks") || null
   };
 }
-
-The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.

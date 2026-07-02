@@ -39,6 +39,9 @@ export enum EMDExchangeMode {
  * All fields map 1:1 with the spreadsheet columns.
  */
 export interface EpcTenderRecord {
+  /** PostgreSQL database primary key */
+  id?: string;
+
   /** Column: "SL No." - Unique row index */
   slNo: number;
 
@@ -158,5 +161,20 @@ export interface EpcTenderRecord {
   fileCount?: number;
   hasBoqChart?: boolean;
   bgStatus?: string | null;
+  tenderUpdateStatus?: TenderUpdateStatus;
+  nextAction?: NextAction | null;
 }
+
+export enum TenderUpdateStatus {
+  OPEN = "OPEN",
+  CLOSED = "CLOSED"
+}
+
+export enum NextAction {
+  UPDATE_FROM_AB_LETTER = "UPDATE_FROM_AB_LETTER",
+  BG_REFUND_LETTER_TO_BE_SENT = "BG_REFUND_LETTER_TO_BE_SENT",
+  FOLLOW_UP_FOR_FINANCIAL_STATUS = "FOLLOW_UP_FOR_FINANCIAL_STATUS",
+  REVERSE_AUCTION_PENDING = "REVERSE_AUCTION_PENDING"
+}
+
 

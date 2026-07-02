@@ -1,0 +1,234 @@
+import { prisma } from "../prisma/prismaClient.js";
+
+const cleanDate = (val) => {
+  if (!val) return null;
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? null : d;
+};
+
+const cleanFloat = (val) => {
+  if (val === null || val === undefined || val === "") return null;
+  const num = parseFloat(val);
+  return isNaN(num) ? null : num;
+};
+
+const cleanInt = (val) => {
+  if (val === null || val === undefined || val === "") return null;
+  const num = parseInt(val, 10);
+  return isNaN(num) ? null : num;
+};
+
+const isDateToday = (dateVal) => {
+  if (!dateVal) return false;
+  const d = new Date(dateVal);
+  if (isNaN(d.getTime())) return false;
+  const today = new Date();
+  return d.getDate() === today.getDate() &&
+         d.getMonth() === today.getMonth() &&
+         d.getFullYear() === today.getFullYear();
+};
+
+const isRecordModified = (sheet, db) => {
+  const fields = [
+    { name: "slNo", type: "int" },
+    { name: "docketNo", type: "string" },
+    { name: "tenderFor", type: "string" },
+    { name: "typeOfTender", type: "string" },
+    { name: "nameOfWorkDescription", type: "string" },
+    { name: "totalQuantityMeter", type: "float" },
+    { name: "nameOfTheClient", type: "string" },
+    { name: "lastDateOfSubmission", type: "date" },
+    { name: "tenderOpeningDate", type: "date" },
+    { name: "costOfTenderFeeRs", type: "float" },
+    { name: "emdAmountRs", type: "float" },
+    { name: "estimatedCostRs", type: "float" },
+    { name: "bidValidityDays", type: "int" },
+    { name: "contractPeriodDays", type: "int" },
+    { name: "managementDecision", type: "string" },
+    { name: "participated", type: "boolean" },
+    { name: "tenderPrepareBy", type: "string" },
+    { name: "currentStatus", type: "string" },
+    { name: "tenderSubmittedDate", type: "date" },
+    { name: "reverseAuctionApplicable", type: "boolean" },
+    { name: "reverseAuctionDate", type: "date" },
+    { name: "emdPaymentMode", type: "string" },
+    { name: "bgNoUtrNo", type: "string" },
+    { name: "emdValidity", type: "date" },
+    { name: "loiPoNoAndDate", type: "string" },
+    { name: "remarks", type: "string" },
+    { name: "bidValidityExpired", type: "boolean" },
+    { name: "diffPercentFromL1", type: "float" },
+    { name: "diffPercentFromL2", type: "float" },
+    { name: "reason", type: "string" },
+    { name: "finalRemarks", type: "string" },
+    { name: "attachmentUrl", type: "string" }
+  ];
+
+  for (const field of fields) {
+    let sheetVal = sheet[field.name];
+    let dbVal = db[field.name];
+
+    if (field.type === "date") {
+      const t1 = sheetVal ? new Date(sheetVal).getTime() : null;
+      const t2 = dbVal ? new Date(dbVal).getTime() : null;
+      const isT1NaN = !t1 || isNaN(t1);
+      const isT2NaN = !t2 || isNaN(t2);
+      if (isT1NaN && isT2NaN) continue;
+      if (isT1NaN || isT2NaN || t1 !== t2) return true;
+    } else if (field.type === "int") {
+      const v1 = sheetVal !== null && sheetVal !== undefined && sheetVal !== "" ? parseInt(sheetVal, 10) : null;
+      const v2 = dbVal !== null && dbVal !== undefined && dbVal !== "" ? parseInt(dbVal, 10) : null;
+      const isV1NaN = v1 === null || isNaN(v1);
+      const isV2NaN = v2 === null || isNaN(v2);
+      if (isV1NaN && isV2NaN) continue;
+      if (isV1NaN || isV2NaN || v1 !== v2) return true;
+    } else if (field.type === "float") {
+      const v1 = sheetVal !== null && sheetVal !== undefined && sheetVal !== "" ? parseFloat(sheetVal) : null;
+      const v2 = dbVal !== null && dbVal !== undefined && dbVal !== "" ? parseFloat(dbVal) : null;
+      const isV1NaN = v1 === null || isNaN(v1);
+      const isV2NaN = v2 === null || isNaN(v2);
+      if (isV1NaN && isV2NaN) continue;
+      if (isV1NaN || isV2NaN || v1 !== v2) return true;
+    } else if (field.type === "boolean") {
+      const v1 = Boolean(sheetVal);
+      const v2 = Boolean(dbVal);
+      if (v1 !== v2) return true;
+    } else {
+      const v1 = (sheetVal || "").toString().trim();
+      const v2 = (dbVal || "").toString().trim();
+      if (v1 !== v2) return true;
+    }
+  }
+
+  return false;
+};
+
+export class DatabaseTenderService {
+  /**
+   * Upsert a list of tenders to PostgreSQL.
+   * Only triggers comparisons and writes if the record counts mismatch or if any record contains today's date.
+   */
+  static async upsertTenders(records) {
+    const validRecords = records.filter(r => r.tenderNoNitNo && r.tenderNoNitNo.trim() !== "");
+    
+    // 1. Fetch current database count (takes < 5ms)
+    const dbCount = await prisma.tender.count();
+    const countMismatch = validRecords.length !== dbCount;
+
+    // 2. Check if any record in the sheet has today's date
+    const hasTodayDate = validRecords.some(r => 
+      isDateToday(r.tenderSubmittedDate) || 
+      isDateToday(r.lastDateOfSubmission) ||
+      isDateToday(r.tenderOpeningDate) ||
+      isDateToday(r.reverseAuctionDate) ||
+      isDateToday(r.emdValidity)
+    );
+
+    if (!countMismatch && !hasTodayDate) {
+      console.log(`[DatabaseTenderService] Skipped database sync. DB count matches sheet count (${dbCount}) and no Google Sheet records contain today's date.`);
+      return;
+    }
+
+    console.log(`[DatabaseTenderService] Database sync triggered (Count mismatch: ${countMismatch}, Has today's date: ${hasTodayDate}). Comparing ${validRecords.length} records...`);
+    
+    // Fetch all existing database records to compare
+    const existingList = await prisma.tender.findMany();
+    const existingMap = new Map();
+    existingList.forEach(item => {
+      existingMap.set(item.tenderNoNitNo, item);
+    });
+
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+
+    for (const record of validRecords) {
+      const data = {
+        slNo: cleanInt(record.slNo) || 0,
+        docketNo: record.docketNo || "",
+        tenderFor: record.tenderFor || "",
+        typeOfTender: record.typeOfTender || "",
+        tenderNoNitNo: record.tenderNoNitNo,
+        nameOfWorkDescription: record.nameOfWorkDescription || null,
+        totalQuantityMeter: cleanFloat(record.totalQuantityMeter),
+        nameOfTheClient: record.nameOfTheClient || "",
+        lastDateOfSubmission: cleanDate(record.lastDateOfSubmission),
+        tenderOpeningDate: cleanDate(record.tenderOpeningDate),
+        costOfTenderFeeRs: cleanFloat(record.costOfTenderFeeRs),
+        emdAmountRs: cleanFloat(record.emdAmountRs),
+        estimatedCostRs: cleanFloat(record.estimatedCostRs),
+        bidValidityDays: cleanInt(record.bidValidityDays),
+        contractPeriodDays: cleanInt(record.contractPeriodDays),
+        managementDecision: record.managementDecision || "Pending",
+        participated: Boolean(record.participated),
+        tenderPrepareBy: record.tenderPrepareBy || "",
+        currentStatus: record.currentStatus || "",
+        tenderSubmittedDate: cleanDate(record.tenderSubmittedDate),
+        reverseAuctionApplicable: Boolean(record.reverseAuctionApplicable),
+        reverseAuctionDate: cleanDate(record.reverseAuctionDate),
+        emdPaymentMode: record.emdPaymentMode || null,
+        bgNoUtrNo: record.bgNoUtrNo || null,
+        emdValidity: cleanDate(record.emdValidity),
+        loiPoNoAndDate: record.loiPoNoAndDate || null,
+        remarks: record.remarks || null,
+        bidValidityExpired: Boolean(record.bidValidityExpired),
+        diffPercentFromL1: cleanFloat(record.diffPercentFromL1),
+        diffPercentFromL2: cleanFloat(record.diffPercentFromL2),
+        reason: record.reason || null,
+        finalRemarks: record.finalRemarks || null,
+        attachmentUrl: record.attachmentUrl || null,
+      };
+
+      const dbRecord = existingMap.get(record.tenderNoNitNo);
+
+      if (!dbRecord) {
+        try {
+          await prisma.tender.create({
+            data,
+          });
+          insertedCount++;
+        } catch (err) {
+          console.error(`❌ CREATE FAILURE for new tender: ${record.tenderNoNitNo}`, err);
+        }
+      } else if (isRecordModified(record, dbRecord)) {
+        try {
+          await prisma.tender.update({
+            where: { id: dbRecord.id },
+            data,
+          });
+          updatedCount++;
+        } catch (err) {
+          console.error(`❌ UPDATE FAILURE for modified tender: ${record.tenderNoNitNo}`, err);
+        }
+      } else {
+        skippedCount++;
+      }
+    }
+
+    console.log(`[DatabaseTenderService] Sync Complete: ${insertedCount} inserted, ${updatedCount} updated, ${skippedCount} skipped.`);
+  }
+
+  /**
+   * Retrieves all tenders from PostgreSQL.
+   */
+  static async getAllTenders() {
+    return prisma.tender.findMany({
+      orderBy: {
+        slNo: "asc",
+      },
+    });
+  }
+
+  /**
+   * Updates only the two application-managed fields.
+   */
+  static async updateTenderStatusAndAction(id, tenderUpdateStatus, nextAction) {
+    return prisma.tender.update({
+      where: { id },
+      data: {
+        tenderUpdateStatus,
+        nextAction,
+      },
+    });
+  }
+}

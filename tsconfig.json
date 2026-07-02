@@ -38,6 +38,9 @@
     "hooks",
     "main.tsx",
     "global.d.ts",
+    "prisma",
+    "app/generated/prisma",
+    "scripts",
     ".next/types/**/*.ts"
   ],
   "exclude": [

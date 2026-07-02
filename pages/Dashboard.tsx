@@ -15,6 +15,9 @@ export const Dashboard: React.FC = () => {
   // 1. Fetch Live Google Sheet Data using custom dual-mode hook
   const { data: liveRecords, loading: liveLoading, error: liveError, refresh: liveRefresh } = useTenderData();
 
+  // Trigger to clear table filters
+  const [clearTrigger, setClearTrigger] = useState<number>(0);
+
   // 2. Active Dataset (No fallback to demo)
   const rawRecords = liveRecords || [];
 
@@ -140,6 +143,21 @@ export const Dashboard: React.FC = () => {
     await liveRefresh();
   };
 
+  const handleClearAllFilters = () => {
+    setClientSearch("");
+    setSelectedStatuses([]);
+    setSelectedEngineer("All");
+    setSelectedDecision("All");
+    setValueMin("");
+    setValueMax("");
+    setPriceBasisFilter("All");
+    setAluminiumMin("");
+    setAluminiumMax("");
+    setCopperMin("");
+    setCopperMax("");
+    setClearTrigger(prev => prev + 1);
+  };
+
   return (
     <div className="dashboard-layout-container">
       {/* Sidebar Filter Panel */}
@@ -181,8 +199,20 @@ export const Dashboard: React.FC = () => {
             <h1 className="brand-logo-text">LASERPOWER <span>PARTICIPATION</span></h1>
             <div className="brand-divider"></div>
             <span className="brand-title">Executive Tender Dashboard</span>
+            
           </div>
           <div className="header-actions">
+            <a 
+              href="http://192.168.0.230:2026/" 
+              target="_blank" 
+              rel="noopener noreferrer" 
+              className="ai-dashboard-btn"
+            >
+              🤖 AI Dashboard
+            </a>
+            <button className="clear-filters-btn" onClick={handleClearAllFilters}>
+              🧹 Clear Filters
+            </button>
             <button className="erp-sync-btn" onClick={handleRefresh} disabled={liveLoading}>
               {liveLoading ? "🔄 Syncing..." : "🔄 Sync Sheet Data"}
             </button>
@@ -225,7 +255,7 @@ export const Dashboard: React.FC = () => {
               <AlertPanel alerts={alertData} />
 
               {/* 2. Scrollable Data Table tier */}
-              <TenderTable records={activeDataset} />
+              <TenderTable records={activeDataset} clearTrigger={clearTrigger} />
             </>
           )}
         </main>
@@ -237,8 +267,8 @@ export const Dashboard: React.FC = () => {
               <span className="sync-pulse-dot" style={{ backgroundColor: "#34a853" }}></span>
               <span>DATABASE LIVE (SYNC: ACTIVE)</span>
             </div>
-            <span>|</span>
-            <span style={{ color: "#137333" }}>PARTICIPATED ONLY (JAN 1, 2026 - PRESENT)</span>
+            {/* <span>|</span>
+            <span style={{ color: "#137333" }}>PARTICIPATED ONLY</span> */}
           </div>
           <div className="status-center">
             LASERPOWER LIVE GOOGLE SHEET PIPELINE ACTIVE

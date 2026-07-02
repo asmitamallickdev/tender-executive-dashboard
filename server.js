@@ -5,6 +5,8 @@ import fs from "fs";
 import path from "path";
 import XLSX from "xlsx";
 import { registerAttachmentRoutes } from "./controllers/tenderAttachmentController.js";
+import { registerTenderRoutes } from "./controllers/tenderController.js";
+import { DatabaseTenderService } from "./services/databaseTenderService.js";
 
 // Native multiline-aware .env file loader
 try {
@@ -23,6 +25,110 @@ try {
   // Ignore
 }
 
+/**
+ * Extracts the pure numeric portion from an ENQ-style docket string.
+ * Examples:
+ *   "ENQ-20277-25-26"  → "20277"
+ *   "20277"            → "20277"
+ *   "ENG-18970-24-25" → "18970"
+ *   "-" / null        → null
+ * Used to build the docketNo that matches local server folder names.
+ */
+const extractNumericDocket = (docketStr) => {
+  if (!docketStr || docketStr.trim() === "" || docketStr.trim() === "-") return null;
+  // Priority 1: ENQ/ENG/ENC prefix pattern → capture the middle number segment
+  const prefixMatch = docketStr.match(/(?:ENQ|ENG|ENC|FNO)[-_](\d+)/i);
+  if (prefixMatch) return prefixMatch[1];
+  // Priority 2: Already a pure number
+  const pureNum = docketStr.trim();
+  if (/^\d+$/.test(pureNum)) return pureNum;
+  // Priority 3: First run of 4–6 digits anywhere in the string
+  const looseMatch = docketStr.match(/(\d{4,6})/);
+  return looseMatch ? looseMatch[1] : null;
+};
+
+/**
+ * Helper to identify if a string matches a date format.
+ */
+function isDate(str) {
+  return /^\d{1,2}[-.\/][a-z0-9]{2,4}[-.\/]\d{2,4}$/i.test(str);
+}
+
+/**
+ * Parses and extracts a clean bank guarantee (BG) number from the raw input text.
+ */
+function extractBgNumber(str) {
+  if (!str) return "";
+  
+  const trimmed = str.trim();
+  
+  // 1. Check if it's the Excel tab-separated paste format (usually contains BG No\tBG Date or multiple tabs/newlines)
+  if (trimmed.includes("\t") && (trimmed.toLowerCase().includes("bg no\t") || trimmed.toLowerCase().includes("bg date"))) {
+    const lines = trimmed.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (lines.length > 1) {
+      const cols = lines[1].split("\t").map(c => c.trim()).filter(Boolean);
+      if (cols.length > 0) {
+        const candidate = cols[0].replace(/['"]/g, "").trim();
+        if (!isDate(candidate)) {
+          return candidate;
+        }
+      }
+    }
+  }
+
+  // 2. Look for explicit prefixes: "BG No :", "BG No:", "BG No-", "BG No.", "BG "
+  // We want to capture the alphanumeric string right after.
+  const explicitRegex = /(?:bg\s*no\s*[:.-]?\s*|bg\s+)([a-z0-9]{8,25})/i;
+  const match = trimmed.match(explicitRegex);
+  if (match) {
+    const candidate = match[1];
+    if (!isDate(candidate)) {
+      return candidate;
+    }
+  }
+
+  // 3. Fallback: If no explicit prefix matches, let's see if the word starts with a known BG pattern (e.g. contains "BG" or is a long number)
+  const words = trimmed.split(/[\s,;:\r\n\t]+/).map(w => w.trim()).filter(Boolean);
+  for (const word of words) {
+    const cleanWord = word.replace(/[^a-z0-9]/ig, "");
+    if (cleanWord.length >= 10 && cleanWord.length <= 20) {
+      const lower = cleanWord.toLowerCase();
+      if (!lower.includes("dated") && !lower.includes("issue") && !lower.includes("value") && !lower.includes("amount")) {
+        if (lower.includes("bg") && !isDate(word)) {
+          return cleanWord;
+        }
+      }
+    }
+  }
+
+  // Second pass: check for a long digit-only word
+  for (const word of words) {
+    const cleanWord = word.replace(/[^a-z0-9]/ig, "");
+    if (/^\d{12,20}$/.test(cleanWord) && !isDate(word)) {
+      return cleanWord;
+    }
+  }
+
+  return "";
+}
+
+const getGoogleDriveFileId = (url) => {
+  if (!url) return null;
+  let match = url.match(/id=([a-zA-Z0-9_-]+)/);
+  if (match) return match[1];
+  match = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (match) return match[1];
+  return null;
+};
+
+const getGoogleDriveDownloadUrl = (url) => {
+  const fileId = getGoogleDriveFileId(url);
+  if (fileId) {
+    return `https://docs.google.com/uc?export=download&id=${fileId}`;
+  }
+  return url;
+};
+
 const app = express();
 const PORT = 3001;
 
@@ -34,6 +140,284 @@ app.get("/api/tenders", handler);
 
 // Register attachment and download API routes
 registerAttachmentRoutes(app);
+registerTenderRoutes(app);
+
+// ── Smartsheet Tender Dashboard API ─────────────────────────────────────────
+// GET /api/smartsheet-tenders
+// Fetches and maps rows from the configured Smartsheet sheet.
+// Makes exactly ONE Smartsheet API call per request.
+app.get("/api/smartsheet-tenders", async (req, res) => {
+  const token = process.env.SMARTSHEET_API_TOKEN;
+  const sheetId = process.env.SMARTSHEET_SHEET_ID;
+
+  if (!token || token.trim() === "") {
+    return res.status(500).json({
+      success: false,
+      error: "Server is not configured. SMARTSHEET_API_TOKEN is missing.",
+      code: "MISSING_TOKEN",
+    });
+  }
+
+  if (!sheetId || sheetId.trim() === "") {
+    return res.status(500).json({
+      success: false,
+      error: "Server is not configured. SMARTSHEET_SHEET_ID is missing.",
+      code: "MISSING_SHEET_ID",
+    });
+  }
+
+  try {
+    const url = `https://api.smartsheet.com/2.0/sheets/${sheetId.trim()}`;
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token.trim()}`,
+          "Content-Type": "application/json",
+        },
+      });
+    } catch (networkErr) {
+      const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
+      console.error(`[SmartsheetAPI] Network error: ${msg}`);
+      return res.status(502).json({
+        success: false,
+        error: `Cannot reach Smartsheet API. Check your network connection. (${msg})`,
+        code: "NETWORK_ERROR",
+      });
+    }
+
+    if (!response.ok) {
+      let body = "";
+      try { body = await response.text(); } catch (_) {}
+      console.error(`[SmartsheetAPI] HTTP ${response.status}: ${body}`);
+
+      if (response.status === 401) {
+        return res.status(401).json({
+          success: false,
+          error: "Invalid or expired Smartsheet API token. Verify SMARTSHEET_API_TOKEN in .env.",
+          code: "UNAUTHORIZED",
+        });
+      }
+      if (response.status === 403) {
+        return res.status(403).json({
+          success: false,
+          error: `Smartsheet token does not have access to sheet ${sheetId}. Grant read permissions.`,
+          code: "FORBIDDEN",
+        });
+      }
+      if (response.status === 404) {
+        return res.status(404).json({
+          success: false,
+          error: `Sheet ID "${sheetId}" not found in Smartsheet. Verify SMARTSHEET_SHEET_ID.`,
+          code: "NOT_FOUND",
+        });
+      }
+      if (response.status === 429) {
+        return res.status(429).json({
+          success: false,
+          error: "Smartsheet API rate limit exceeded. Please wait a moment and try again.",
+          code: "RATE_LIMITED",
+        });
+      }
+      return res.status(500).json({
+        success: false,
+        error: `Unexpected Smartsheet API error (${response.status}).`,
+        code: "UNKNOWN",
+      });
+    }
+
+    const sheetData = await response.json();
+    const columns = sheetData.columns || [];
+    const rows = sheetData.rows || [];
+
+    // Build column title → columnId lookup (by name, never by index)
+    // NOTE: titles match the actual Smartsheet column titles exactly (verified by debug inspection)
+    const COLUMN_MAP = {
+      enquiryDate:     "Enquiry Date(MM-DD-YY)  (Debosmita Nath)",
+      partyName:       "Party Name  (Debosmita Nath)",
+      docketNumber:    "Docket No  (Debosmita Nath)",
+      utility:         "Utility (Marketing Team)",
+      quotationNumber: "Quotation No. (Dipankar)",
+      tenderPurchase:  "Tender/ Purchase/Bugetary/ Laser Tender (Marketing",
+    };
+
+    const columnIndex = new Map();
+    for (const col of columns) {
+      if (col.title) columnIndex.set(col.title.trim(), col.id);
+    }
+
+    const getCellValue = (cells, columnId) => {
+      if (columnId === undefined) return null;
+      const cell = cells.find((c) => c.columnId === columnId);
+      if (!cell) return null;
+      if (cell.displayValue !== undefined && cell.displayValue !== null) {
+        return String(cell.displayValue).trim() || null;
+      }
+      if (cell.value !== undefined && cell.value !== null) {
+        return String(cell.value).trim() || null;
+      }
+      return null;
+    };
+
+    const data = rows.map((row) => {
+      const cells = row.cells || [];
+      const get = (field) => getCellValue(cells, columnIndex.get(COLUMN_MAP[field]));
+      return {
+        enquiryDate:     get("enquiryDate"),
+        partyName:       get("partyName"),
+        docketNumber:    get("docketNumber"),
+        utility:         get("utility"),
+        quotationNumber: get("quotationNumber"),
+        tenderPurchase:  get("tenderPurchase"),
+      };
+    });
+
+    // 2. Fetch Google Sheets Costing Attachment list to join
+    let costingRows = [];
+    const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
+    const key = process.env.GOOGLE_PRIVATE_KEY;
+
+    if (email && key) {
+      try {
+        let cleanKey = key.trim().replace(/^["']|["']$/g, "");
+        cleanKey = cleanKey.replace(/\\n/g, "\n");
+        let cleanEmail = email.trim().replace(/^["']|["']$/g, "");
+
+        const accessToken = await getAccessToken(cleanEmail, cleanKey);
+
+        const COSTING_SPREADSHEET_ID = "1FK1t7FeAjQ3v4saIxJUS-5KbE6YlQv-8WFQCBRuaxDQ";
+        const COSTING_WORKSHEET_NAME = "Cost";
+        const costingRange = `${COSTING_WORKSHEET_NAME}!A1:ZZ`;
+        const costingUrl = `https://sheets.googleapis.com/v4/spreadsheets/${COSTING_SPREADSHEET_ID}/values/${encodeURIComponent(costingRange)}`;
+
+        const costingResponse = await fetch(costingUrl, {
+          method: "GET",
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
+          }
+        });
+
+        if (costingResponse.ok) {
+          const costingData = await costingResponse.json();
+          costingRows = costingData.values || [];
+        }
+      } catch (costingErr) {
+        console.warn(`[SmartsheetAPI] Failed to fetch Google Sheet costing data: ${costingErr.message}`);
+      }
+    }
+
+    // Build active lookup map of costing records keyed by numericDocket
+    const costingMap = new Map();
+    if (costingRows && costingRows.length > 1) {
+      const cHeaders = costingRows[0].map(h => h.trim());
+      const cNormalizeHeader = (h) => h.trim().toLowerCase().replace(/\s+/g, "");
+
+      const pasteTmNoIdx = cHeaders.findIndex(h => cNormalizeHeader(h).includes("pastetmno") || cNormalizeHeader(h).includes("puststmno"));
+      const enqDocketNoIdx = cHeaders.findIndex(h => cNormalizeHeader(h).includes("enqdocketno"));
+      const uploadCostingSheetIdx = cHeaders.findIndex(h => cNormalizeHeader(h).includes("uploadcostingsheet"));
+
+      if (uploadCostingSheetIdx !== -1) {
+        for (let i = 1; i < costingRows.length; i++) {
+          const cRow = costingRows[i];
+          if (!cRow || cRow.length === 0) continue;
+
+          const rawUrl = uploadCostingSheetIdx < cRow.length ? cRow[uploadCostingSheetIdx] : "";
+          const rawEnqDocket = (enqDocketNoIdx !== -1 && enqDocketNoIdx < cRow.length) ? cRow[enqDocketNoIdx] : "";
+          const rawPasteTmNo = (pasteTmNoIdx !== -1 && pasteTmNoIdx < cRow.length) ? cRow[pasteTmNoIdx] : "";
+
+          if (!rawUrl || rawUrl.trim() === "-" || rawUrl.trim() === "") continue;
+
+          let numericDocket = extractNumericDocket(rawEnqDocket);
+          if (!numericDocket) {
+            numericDocket = extractNumericDocket(rawPasteTmNo);
+          }
+
+          if (numericDocket) {
+            costingMap.set(numericDocket, {
+              url: rawUrl.trim(),
+              itemCategory: null // Will be dynamically parsed from Excel sheet file details
+            });
+          }
+        }
+      }
+    }
+
+    // Enrich each Smartsheet row with costing details (Tender Qty, Raw Materials)
+    const enrichedData = [];
+    for (const row of data) {
+      const numericDocket = extractNumericDocket(row.docketNumber);
+      let attachmentUrl = null;
+      let proposedQty = null;
+      let priceBasis = null;
+      let itemCategory = null;
+
+      let aluminiumPrice = null;
+      let aluminiumAlloyPrice = null;
+      let copperTapePrice = null;
+      let extrudedSemiconductivePrice = null;
+      let htXlpePrice = null;
+      let pvcTypeSt2Price = null;
+      let galvanisedSteelFlatStripPrice = null;
+      let fillerPrice = null;
+
+      if (numericDocket && costingMap.has(numericDocket)) {
+        const match = costingMap.get(numericDocket);
+        attachmentUrl = match.url;
+        itemCategory = match.itemCategory;
+
+        try {
+          const costingDetails = await getCostingDetails(attachmentUrl, numericDocket);
+          if (costingDetails) {
+            proposedQty = costingDetails.proposedQty;
+            priceBasis = costingDetails.priceBasis;
+            if (costingDetails.prices) {
+              aluminiumPrice = costingDetails.prices.aluminium;
+              aluminiumAlloyPrice = costingDetails.prices.aluminiumAlloy;
+              copperTapePrice = costingDetails.prices.copperTape;
+              extrudedSemiconductivePrice = costingDetails.prices.extrudedSemiconductive;
+              htXlpePrice = costingDetails.prices.htXlpe;
+              pvcTypeSt2Price = costingDetails.prices.pvcTypeSt2;
+              galvanisedSteelFlatStripPrice = costingDetails.prices.galvanisedSteelFlatStrip;
+              fillerPrice = costingDetails.prices.filler;
+            }
+          }
+        } catch (err) {
+          console.warn(`[SmartsheetAPI] Failed to parse costing Excel for docket "${numericDocket}": ${err.message}`);
+        }
+      }
+
+      enrichedData.push({
+        ...row,
+        attachmentUrl: getGoogleDriveDownloadUrl(attachmentUrl),
+        proposedQty,
+        priceBasis,
+        itemCategory,
+        aluminiumPrice,
+        aluminiumAlloyPrice,
+        copperTapePrice,
+        extrudedSemiconductivePrice,
+        htXlpePrice,
+        pvcTypeSt2Price,
+        galvanisedSteelFlatStripPrice,
+        fillerPrice
+      });
+    }
+
+    console.log(`[SmartsheetAPI] ✓ Fetched and enriched ${enrichedData.length} rows.`);
+    return res.status(200).json({ success: true, data: enrichedData });
+  } catch (err) {
+    console.error("[SmartsheetAPI] Unhandled error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "An unexpected server error occurred.",
+      code: "UNKNOWN",
+    });
+  }
+});
+// ────────────────────────────────────────────────────────────────────────────
+
 
 const SPREADSHEET_ID = "1GTwzxMgViohbCimXqfiBZBJsKbCSr7hCgbcHF_En1VE";
 const WORKSHEET_NAME = "LASER_Master_Tender_List";
@@ -55,7 +439,31 @@ if (!fs.existsSync(CACHE_DIR)) {
 async function getCostingDetails(attachmentUrl, docketNo) {
   if (!attachmentUrl) return null;
   
-  const hash = crypto.createHash("md5").update(attachmentUrl).digest("hex");
+  let downloadUrl = attachmentUrl;
+  let headers = {};
+
+  const fileId = getGoogleDriveFileId(attachmentUrl);
+  if (fileId) {
+    downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+    
+    // Get access token dynamically
+    const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
+    const key = process.env.GOOGLE_PRIVATE_KEY;
+    if (email && key) {
+      try {
+        let cleanKey = key.trim().replace(/^["']|["']$/g, "").replace(/\\n/g, "\n");
+        let cleanEmail = email.trim().replace(/^["']|["']$/g, "");
+        const token = await getAccessToken(cleanEmail, cleanKey);
+        if (token) {
+          headers["Authorization"] = `Bearer ${token}`;
+        }
+      } catch (tokErr) {
+        console.warn(`[Cache] Failed to get Google access token for Drive download: ${tokErr.message}`);
+      }
+    }
+  }
+
+  const hash = crypto.createHash("md5").update(downloadUrl).digest("hex");
   const localPath = path.join(CACHE_DIR, `${hash}.xlsx`);
 
   let fileExists = fs.existsSync(localPath);
@@ -76,7 +484,7 @@ async function getCostingDetails(attachmentUrl, docketNo) {
   if (!fileExists) {
     try {
       console.log(`[Cache] Downloading costing Excel for docket "${docketNo}"...`);
-      const response = await fetch(attachmentUrl);
+      const response = await fetch(downloadUrl, { headers });
       if (!response.ok) {
         console.warn(`[Cache] Failed to download Excel for docket "${docketNo}": ${response.statusText}`);
         return null;
@@ -699,6 +1107,16 @@ export default async function handler(req, res) {
       "Remarks", "Bid Validity Expired", "Diff % from L1", "Diff % from L2", "Reason", "Final Remarks"
     ];
 
+    // Optional Sheet 1 column: "Docket No-enq" is the enquiry-side docket fallback.
+    // We read it if present but do NOT require it (so missing columns won't throw).
+    const optionalHeaders = ["Docket No-enq"];
+    optionalHeaders.forEach(reqH => {
+      const normalizedReq = normalizeHeader(reqH);
+      if (normalizedActualMap.has(normalizedReq)) {
+        headerIndexMap.set(reqH, normalizedActualMap.get(normalizedReq));
+      }
+    });
+
     const missingHeaders = [];
     requiredHeaders.forEach(reqH => {
       const normalizedReq = normalizeHeader(reqH);
@@ -735,6 +1153,8 @@ export default async function handler(req, res) {
       return str.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
     };
 
+      // extractNumericDocket is now a global helper function at the top of the file
+
     const joinCostingData = (tenders, costing) => {
       if (!tenders || tenders.length === 0) return [];
       if (!costing || costing.length === 0) {
@@ -754,19 +1174,7 @@ export default async function handler(req, res) {
         return tenders.map(t => ({ ...t, attachmentUrl: null, itemCategory: null }));
       }
 
-      // Helper function to extract numeric docket number
-      const extractDocketNumber = (docketStr) => {
-        if (!docketStr) return null;
-        // Match specific patterns: ENQ-18970-25-26 -> 18970, or extract first sequence of 4-6 digits
-        const match = docketStr.match(/(?:ENQ|ENG|ENC|FNO)[-_](\d+)/i) || docketStr.match(/(\d{4,6})/);
-        if (match) {
-          const numStr = match[1];
-          if (/^\d+$/.test(numStr)) {
-            return numStr;
-          }
-        }
-        return null;
-      };
+      // Reuse the shared extractNumericDocket helper (defined above joinCostingData)
 
       // Build active list of costing records with cleaned references and extracted dockets
       const costingList = [];
@@ -783,7 +1191,7 @@ export default async function handler(req, res) {
 
         let extractedDocket = null;
         if (rawCostingDocket && rawCostingDocket.trim() !== "" && rawCostingDocket.trim() !== "-") {
-          extractedDocket = extractDocketNumber(rawCostingDocket);
+          extractedDocket = extractNumericDocket(rawCostingDocket);
           if (!extractedDocket) {
             console.warn(`[DocketExtraction] Failed to extract numeric docket number from raw costing value: "${rawCostingDocket}" at row ${i + 1}`);
           }
@@ -804,7 +1212,6 @@ export default async function handler(req, res) {
         const tenderNo = tender.tenderNoNitNo || "";
         const cleanTenderNo = cleanStr(tenderNo);
         let attachmentUrl = null;
-        let docketNo = tender.docketNo;
         let itemCategory = null;
 
         if (cleanTenderNo !== "") {
@@ -816,29 +1223,39 @@ export default async function handler(req, res) {
             match = costingList.find(c => c.cleanRef.includes(cleanTenderNo) || cleanTenderNo.includes(c.cleanRef));
           }
 
+          let docketNo;
           if (match) {
+            // ── Priority 1: Sheet 2 (Costing Attachment sheet) docket ──
+            // extractedDocket is already numeric (e.g. "20277") from Sheet 2's Docket No column.
+            // If Sheet 2 docket is missing, fall back to extracting numeric part from Sheet 1's docketNoEnq.
             attachmentUrl = match.url;
-            if (match.extractedDocket) {
-              docketNo = match.extractedDocket;
-            } else {
-              docketNo = "-";
-            }
+            docketNo = match.extractedDocket
+              || extractNumericDocket(tender.docketNoEnq)
+              || "-";
             itemCategory = match.itemCategory;
             matchCount++;
           } else {
-            // Unmatched tenders should not show date-time docket numbers
-            docketNo = "-";
+            // ── Priority 2: Sheet 1 "Docket No-enq" column fallback ──
+            // Extract the numeric portion (e.g. "20277" from "ENQ-20277-25-26")
+            // so it matches the local server folder naming convention.
+            docketNo = extractNumericDocket(tender.docketNoEnq) || "-";
           }
-        } else {
-          docketNo = "-";
-        }
 
-        return {
-          ...tender,
-          attachmentUrl,
-          docketNo,
-          itemCategory
-        };
+          return {
+            ...tender,
+            attachmentUrl,
+            docketNo,
+            itemCategory
+          };
+        } else {
+          // No tender ref at all — still try extracting numeric part from Sheet 1 enquiry docket
+          return {
+            ...tender,
+            attachmentUrl: null,
+            docketNo: extractNumericDocket(tender.docketNoEnq) || "-",
+            itemCategory: null
+          };
+        }
       });
     };
 
@@ -846,14 +1263,31 @@ export default async function handler(req, res) {
 
     // Parse BG Rows
     const bgMap = [];
-    if (bgRows.length > 1) {
-      const bgHeaders = bgRows[0].map(h => h.trim().toLowerCase());
-      const bgNoIdx = bgHeaders.indexOf("bg no");
-      const remarkIdx = bgHeaders.indexOf("remark");
-      const statusIdx = bgHeaders.indexOf("status");
+    if (bgRows.length > 0) {
+      // Dynamically find the header row by searching for a row containing "bg no" and "status" (case-insensitive)
+      let headerRowIdx = -1;
+      let bgNoIdx = -1;
+      let remarkIdx = -1;
+      let statusIdx = -1;
 
-      if (bgNoIdx !== -1 && statusIdx !== -1) {
-        for (let i = 1; i < bgRows.length; i++) {
+      for (let i = 0; i < Math.min(bgRows.length, 5); i++) {
+        const row = bgRows[i];
+        if (row) {
+          const normalized = row.map(h => String(h || "").trim().toLowerCase());
+          const bgNo = normalized.indexOf("bg no");
+          const status = normalized.indexOf("status");
+          if (bgNo !== -1 && status !== -1) {
+            headerRowIdx = i;
+            bgNoIdx = bgNo;
+            remarkIdx = normalized.indexOf("remark");
+            statusIdx = status;
+            break;
+          }
+        }
+      }
+
+      if (headerRowIdx !== -1) {
+        for (let i = headerRowIdx + 1; i < bgRows.length; i++) {
           const row = bgRows[i];
           if (row && row.length > Math.max(bgNoIdx, statusIdx)) {
             const bgNo = String(row[bgNoIdx] || "").trim();
@@ -869,6 +1303,8 @@ export default async function handler(req, res) {
             });
           }
         }
+      } else {
+        console.warn("[WARNING] Could not find header row containing 'bg no' and 'status' in EMD DETAILS-BG sheet.");
       }
     }
 
@@ -898,11 +1334,26 @@ export default async function handler(req, res) {
       const rawBgNo = tender.bgNoUtrNo || "";
       const cleanDashBg = rawBgNo.toLowerCase().replace(/[^a-z0-9]/g, "");
 
+      // Extract and match bank guarantee (BG) number cleanly
+      const extractedBg = extractBgNumber(rawBgNo);
+      const cleanExtractedBg = extractedBg.toLowerCase().replace(/[^a-z0-9]/g, "");
+
       let bgMatch = null;
-      if (cleanDashBg) {
+      if (cleanExtractedBg) {
+        bgMatch = bgMap.find(b => b.cleanBgNo && b.cleanBgNo === cleanExtractedBg);
+      }
+
+      // Fallback 1: Substring match on extracted BG
+      if (!bgMatch && cleanExtractedBg) {
+        bgMatch = bgMap.find(b => b.cleanBgNo && (cleanExtractedBg.includes(b.cleanBgNo) || b.cleanBgNo.includes(cleanExtractedBg)));
+      }
+
+      // Fallback 2: Substring match on the entire raw field
+      if (!bgMatch && cleanDashBg) {
         bgMatch = bgMap.find(b => b.cleanBgNo && (cleanDashBg.includes(b.cleanBgNo) || b.cleanBgNo.includes(cleanDashBg)));
       }
 
+      // Fallback 3: Search by tender number in BG remarks
       if (!bgMatch && cleanTenderNo) {
         bgMatch = bgMap.find(b => {
           if (!b.cleanRemark) return false;
@@ -912,6 +1363,29 @@ export default async function handler(req, res) {
 
       if (bgMatch) {
         bgStatus = bgMatch.status;
+      }
+
+      // Fallback Tender Number Remark Lookup (Executed only if primary BG Number lookup fails)
+      if (!bgStatus) {
+        if (tender.tenderNoNitNo) {
+          const rawTenderNo = String(tender.tenderNoNitNo).trim();
+          const coreTenderNo = rawTenderNo
+            .replace(/^(?:Tender Enquiry No\.|Tender Enquiry No|Tender No|NIT No)\s*[:.-]?\s*/i, "")
+            .replace(/[,.]\s*$/, "")
+            .trim();
+
+          if (coreTenderNo) {
+            const matchedBg = bgMap.find(b => {
+              const remark = String(b.remark || "").trim();
+              return remark.toLowerCase().includes(coreTenderNo.toLowerCase());
+            });
+            bgStatus = matchedBg ? (matchedBg.status || null) : null;
+          } else {
+            bgStatus = null;
+          }
+        } else {
+          bgStatus = null;
+        }
       }
 
       if (tender.attachmentUrl) {
@@ -963,11 +1437,59 @@ export default async function handler(req, res) {
       };
     }));
 
-    return res.status(200).json(enrichedRecords);
+    // 1. Fetch current database records to merge enums and get database IDs (takes < 20ms)
+    const dbTenders = await DatabaseTenderService.getAllTenders();
+    const dbMap = new Map(dbTenders.map(t => [t.tenderNoNitNo, t]));
+
+    // 2. Build the merged dataset prioritizing live Google Sheet rows
+    const mergedRecords = enrichedRecords.map(enriched => {
+      const dbTender = dbMap.get(enriched.tenderNoNitNo);
+      if (dbTender) {
+        return {
+          ...enriched,
+          id: dbTender.id,
+          tenderUpdateStatus: dbTender.tenderUpdateStatus || "OPEN",
+          nextAction: dbTender.nextAction || null
+        };
+      }
+      return enriched;
+    });
+
+    // 3. Append any database-only records (created in the database, not in Google Sheets)
+    const sheetTenderNos = new Set(enrichedRecords.map(r => r.tenderNoNitNo));
+    dbTenders.forEach(dbTender => {
+      if (!sheetTenderNos.has(dbTender.tenderNoNitNo)) {
+        mergedRecords.push({
+          ...dbTender,
+          priceBasis: "Firm",
+          aluminiumPrice: null,
+          aluminiumAlloyPrice: null,
+          copperTapePrice: null,
+          extrudedSemiconductivePrice: null,
+          htXlpePrice: null,
+          pvcTypeSt2Price: null,
+          galvanisedSteelFlatStripPrice: null,
+          fillerPrice: null,
+          proposedErpItemName: "",
+          proposedQty: "",
+          competitors: "",
+          fileCount: 0,
+          hasBoqChart: false,
+          bgStatus: null
+        });
+      }
+    });
+
+    // 4. Trigger database upsert/comparison in the background concurrently
+    DatabaseTenderService.upsertTenders(enrichedRecords).catch(err => {
+      console.error("❌ Background database sync failure:", err);
+    });
+
+    return res.status(200).json(mergedRecords);
 
   } catch (err) {
-    console.error("❌ ERROR in serverless handler:", err.message);
-    return res.status(500).json({ error: err.message });
+    console.error("❌ ERROR in serverless handler:", err);
+    return res.status(500).json({ error: err.stack || err.message });
   }
 }
 
@@ -1103,6 +1625,9 @@ function parseRow(row, headerMap, rowNum) {
   return {
     slNo,
     docketNo: getValue("Docket No"),
+    // Fallback docket from Sheet 1 "Docket No-enq" column (enquiry-side docket number).
+    // Used when Sheet 2 costing join finds no match for this tender.
+    docketNoEnq: getValue("Docket No-enq") || null,
     tenderFor: getValue("Tender For"),
     typeOfTender: getValue("Type of Tender"),
     tenderNoNitNo: getValue("Tender No / NIT No with Date"),
